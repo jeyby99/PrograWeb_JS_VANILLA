@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="es" xmlns:th="http://www.thymeleaf.org">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Inicio - PrograWeb</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body>
+    <div class="container mt-5 text-center">
+        <h1>Bienvenido a la Aplicación PrograWeb</h1>
+        <p class="lead">Sistema Multi-Arquitectura (Thymeleaf + Vanilla JS)</p>
+        
+        <div class="row mt-5 justify-content-center">
+            
+            <!-- SECCIÓN 1: CRUD TRADICIONAL (Thymeleaf) -->
+            <div class="col-md-4 mb-4">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <h4 class="card-title text-primary">CRUD Principal</h4>
+                        <p class="card-text">Gestión de Entidades renderizada en el servidor con Thymeleaf.</p>
+                        <a th:href="@{/entidades}" class="btn btn-primary w-100 mb-2">Ver Lista de Entidades</a>
+                        <a th:href="@{/entidades/nueva}" class="btn btn-outline-primary w-100">Crear Nueva Entidad</a>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SECCIÓN 2: FRONTEND VANILLA JS (API REST) -->
+            <div class="col-md-4 mb-4">
+                <div class="card shadow-sm h-100">
+                    <div class="card-body">
+                        <h4 class="card-title text-success">Frontend Vanilla JS</h4>
+                        <p class="card-text">Consumo de APIs REST usando Fetch y JavaScript puro.</p>
+                        <!-- Enlaces directos a los archivos estáticos -->
+                        <a th:href="@{/pagina1.html}" class="btn btn-success w-100 mb-2">Página 1 (Búsqueda en Tiempo Real)</a>
+                        <a th:href="@{/pagina2.html}" class="btn btn-outline-success w-100">Página 2 (Debounce 4s y APIs Externas)</a>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+</body>
+</html>

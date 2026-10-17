@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Página 2 - Vanilla JS</title>
+
+    <!-- Bootstrap 5 (contenedor, input-group, utilidades) -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Tailwind (grid responsivo de las tarjetas). Preflight desactivado para no chocar con Bootstrap -->
+    <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+    <script>tailwind.config = { corePlugins: { preflight: false } };</script>
+
+    <style>
+        :root { --azul: #1a6b8c; }
+
+        body {
+            font-family: Arial, sans-serif;
+            background: #fff;
+            padding: 40px 16px;
+        }
+
+        /* Flexbox: barra de búsqueda */
+        .search-container {
+            background: var(--azul);
+            padding: 20px 40px;
+            display: flex;
+            justify-content: center;
+            margin-bottom: 24px;
+        }
+        .search-container input {
+            border-radius: 0;
+            font-size: 16px;
+        }
+
+        #statusIndicator {
+            min-height: 24px;
+            margin-bottom: 16px;
+            color: #d9534f;
+            font-weight: bold;
+            text-align: center;
+        }
+
+        /* Flexbox: contenido de cada tarjeta */
+        .card-item {
+            background: var(--azul);
+            color: #fff;
+            padding: 20px;
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            min-height: 220px;
+            overflow: hidden;
+        }
+        .card-item .tag {
+            font-size: 12px;
+            background: rgba(255,255,255,.2);
+            padding: 2px 8px;
+            margin-bottom: 8px;
+        }
+        .card-item p { margin: 4px 0; font-size: 16px; word-break: break-word; }
+        .card-item .desc { font-size: 13px; opacity: .9; }
+        .card-item img {
+            width: 96px;
+            height: 96px;
+            object-fit: contain;
+            margin-top: 10px;
+            border: 1px solid #fff;
+            background: #fff;
+        }
+
+        /* Media Queries */
+        @media (max-width: 991.98px) {
+            .card-item { min-height: 200px; }
+        }
+        @media (max-width: 575.98px) {
+            body { padding: 20px 10px; }
+            .search-container { padding: 16px; }
+            .card-item { min-height: 180px; }
+        }
+    </style>
+</head>
+<body>
+<div class="container" style="max-width: 900px;">
+
+    <!-- Barra de búsqueda -->
+    <div class="search-container">
+        <div class="input-group">
+            <input type="text" id="searchInput" class="form-control" placeholder="Barra de busqueda (ej: rick, earth, pika, potion)">
+            <button id="btnBuscar" class="btn btn-light" type="button">Buscar</button>
+        </div>
+    </div>
+
+    <div id="statusIndicator"></div>
+
+    <!-- Grid: Tailwind (1 col móvil, 2 tablet, 3 escritorio) sobre el grid propio -->
+    <div id="resultadosGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-8"></div>
+</div>
+
+<script>
+    const DEBOUNCE_MS = 4000; // espera de 4 segundos (cámbialo a 500 si quieres más rápido)
+
+    const inputBusqueda = document.getElementById('searchInput');
+    const btnBuscar = document.getElementById('btnBuscar');
+    const grid = document.getElementById('resultadosGrid');
+    const statusIndicator = document.getElementById('statusIndicator');
+    let timeoutId, cuentaId;
+
+    // Imagen de respaldo (SVG embebido, no depende de internet)
+    const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#e6eef2"/>' +
+        '<text x="48" y="54" font-size="16" text-anchor="middle" fill="#1a6b8c" font-family="Arial">IMG</text></svg>'
+    );
+
+    const esc = (t) => String(t ?? '').replace(/[&<>"']/g, c => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+
+    /* ---------- Maqueta inicial ---------- */
+    function renderizarMaquetaInicial() {
+        grid.innerHTML = Array.from({ length: 6 }, () => `
+            <div class="card-item shadow-md">
+                <p>Descripcion ,</p>
+                <p>Imagen</p>
+            </div>`).join('');
+    }
+    renderizarMaquetaInicial();
+    const BUSQUEDA_INICIAL = 'rick';
+
+    /* ---------- API 1: Rick and Morty (3 endpoints) ---------- */
+    const RM = 'https://rickandmortyapi.com/api';
+    const fuentesRM = [
+        {
+            tipo: 'Personaje',
+            url: q => `${RM}/character/?name=${encodeURIComponent(q)}`,
+            map: i => ({ nombre: i.name, desc: `${i.species} - ${i.status}`, img: i.image })
+        },
+        {
+            tipo: 'Ubicación',
+            url: q => `${RM}/location/?name=${encodeURIComponent(q)}`,
+            map: i => ({ nombre: i.name, desc: `${i.type} - ${i.dimension}`, img: null })
+        },
+        {
+            tipo: 'Episodio',
+            url: q => `${RM}/episode/?name=${encodeURIComponent(q)}`,
+            map: i => ({ nombre: i.name, desc: `${i.episode} - ${i.air_date}`, img: null })
+        }
+    ];
+
+    /* ---------- API 2: PokéAPI (3 endpoints) ----------
+       PokéAPI no filtra por nombre parcial, así que se descarga la lista una vez,
+       se guarda en caché y se filtra en el navegador. */
+    const POKE = 'https://pokeapi.co/api/v2';
+    const cache = {};
+    async function listaPoke(endpoint) {
+        if (!cache[endpoint]) {
+            const r = await fetch(`${POKE}/${endpoint}?limit=2000`);
+            if (!r.ok) throw new Error(endpoint);
+            cache[endpoint] = (await r.json()).results;
+        }
+        return cache[endpoint];
+    }
+    const idDeUrl = url => url.split('/').filter(Boolean).pop();
+    const SPR = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites';
+
+    const fuentesPoke = [
+        {
+            tipo: 'Pokémon', endpoint: 'pokemon',
+            map: i => ({ nombre: i.name, desc: `Pokémon #${idDeUrl(i.url)}`,
+                         img: `${SPR}/pokemon/other/official-artwork/${idDeUrl(i.url)}.png` })
+        },
+        {
+            tipo: 'Objeto', endpoint: 'item',
+            map: i => ({ nombre: i.name, desc: 'Objeto Pokémon', img: `${SPR}/items/${i.name}.png` })
+        },
+        {
+            tipo: 'Baya', endpoint: 'berry',
+            map: i => ({ nombre: i.name, desc: 'Baya Pokémon', img: `${SPR}/items/${i.name}-berry.png` })
+        }
+    ];
+
+    /* ---------- Búsqueda en las 6 fuentes ---------- */
+    async function buscarRM(fuente, q) {
+        const r = await fetch(fuente.url(q));
+        if (!r.ok) return []; // 404 = sin coincidencias
+        const data = await r.json();
+        return (data.results || []).map(fuente.map).map(x => ({ ...x, tipo: fuente.tipo }));
+    }
+
+    async function buscarPoke(fuente, q) {
+        const lista = await listaPoke(fuente.endpoint);
+        return lista
+            .filter(i => i.name.includes(q.toLowerCase()))
+            .map(fuente.map)
+            .map(x => ({ ...x, tipo: fuente.tipo }));
+    }
+
+    async function ejecutarBusqueda(query) {
+        statusIndicator.style.color = '#d9534f';
+        statusIndicator.textContent = '🚀 Consultando APIs...';
+
+        const tareas = [
+            ...fuentesRM.map(f => buscarRM(f, query)),
+            ...fuentesPoke.map(f => buscarPoke(f, query))
+        ];
+        const respuestas = await Promise.allSettled(tareas);
+
+        const listas = respuestas.map(r => r.status === 'fulfilled' ? r.value : []);
+        const fallos = respuestas.filter(r => r.status === 'rejected').length;
+
+        // Mezcla balanceada: 1 de cada endpoint por ronda, hasta 6 tarjetas
+        const resultados = [];
+        for (let ronda = 0; resultados.length < 6; ronda++) {
+            let agregado = false;
+            for (const lista of listas) {
+                if (lista[ronda] && resultados.length < 6) {
+                    resultados.push(lista[ronda]);
+                    agregado = true;
+                }
+            }
+            if (!agregado) break;
+        }
+
+        if (resultados.length === 0) {
+            statusIndicator.textContent = fallos === tareas.length
+                ? '❌ Error de conexión con las APIs.'
+                : 'No se encontraron resultados. Prueba con otro nombre.';
+            renderizarMaquetaInicial();
+            return;
+        }
+
+        statusIndicator.style.color = '#198754';
+        statusIndicator.textContent = '✅ Resultados mostrados.';
+
+        grid.innerHTML = resultados.map(r => `
+            <div class="card-item shadow-md">
+                <span class="tag">${esc(r.tipo)}</span>
+                <p>${esc(r.nombre)} ,</p>
+                <p class="desc">${esc(r.desc)}</p>
+                <img src="${esc(r.img || PLACEHOLDER)}" alt="${esc(r.nombre)}" loading="lazy"
+                     onerror="this.onerror=null;this.src='${PLACEHOLDER.replace(/'/g, "\\'")}'">
+            </div>`).join('');
+    }
+
+    /* ---------- Debounce + Enter + botón ---------- */
+    inputBusqueda.addEventListener('input', () => {
+        const query = inputBusqueda.value.trim();
+        clearTimeout(timeoutId);
+
+        clearInterval(cuentaId);
+        if (query === '') {
+            statusIndicator.textContent = '';
+            ejecutarBusqueda(BUSQUEDA_INICIAL);
+            return;
+        }
+        // Cuenta regresiva visible para que se note que sí está esperando
+        let restante = DEBOUNCE_MS / 1000;
+        statusIndicator.style.color = '#d9534f';
+        const pintar = () => statusIndicator.textContent = `⏳ Buscando en ${restante} s (debounce)... o presiona Enter`;
+        pintar();
+        cuentaId = setInterval(() => { restante--; if (restante > 0) pintar(); else clearInterval(cuentaId); }, 1000);
+        timeoutId = setTimeout(() => { clearInterval(cuentaId); ejecutarBusqueda(query); }, DEBOUNCE_MS);
+    });
+
+    function buscarYa() {
+        const query = inputBusqueda.value.trim();
+        if (!query) return;
+        clearTimeout(timeoutId); clearInterval(cuentaId);
+        ejecutarBusqueda(query);
+    }
+    btnBuscar.addEventListener('click', buscarYa);
+    inputBusqueda.addEventListener('keydown', e => { if (e.key === 'Enter') buscarYa(); });
+    document.addEventListener('DOMContentLoaded', () => ejecutarBusqueda(BUSQUEDA_INICIAL));
+</script>
+</body>
+</html>

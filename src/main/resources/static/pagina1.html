@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Página 1 - Búsqueda en Tiempo Real</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f9;
+            margin: 0;
+            padding: 20px;
+        }
+        h1 { text-align: center; color: #333; }
+        .search-container { text-align: center; margin-bottom: 30px; }
+        #searchInput {
+            width: 50%;
+            padding: 12px;
+            font-size: 16px;
+            border: 1px solid #ccc;
+            border-radius: 5px;
+        }
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+            gap: 20px;
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+        .card {
+            background-color: white;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .card h3 { margin-top: 0; color: #0056b3; }
+        .card p { color: #666; font-size: 14px; margin: 5px 0;}
+        .email-badge {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 5px 10px;
+            background-color: #e9ecef;
+            border-radius: 15px;
+            font-size: 13px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>Directorio de Entidades</h1>
+    
+    <div class="search-container">
+        <!-- Input con evento 'oninput' para búsqueda en tiempo real -->
+        <input type="text" id="searchInput" placeholder="Buscar por nombre en tiempo real..." oninput="buscarEntidades()">
+    </div>
+
+    <div id="entidadesGrid" class="grid-container">
+        <!-- Los datos se inyectarán aquí -->
+    </div>
+
+    <script>
+        // URL de tu backend PrograWeb
+        const apiURL = 'http://localhost:8080/api/entidades';
+        const grid = document.getElementById('entidadesGrid');
+        const inputBusqueda = document.getElementById('searchInput');
+
+        // Función principal para consumir el backend
+        async function fetchEntidades(query = '') {
+            try {
+                const url = query ? `${apiURL}?query=${query}` : apiURL;
+                const respuesta = await fetch(url);
+                const datos = await respuesta.json();
+                renderizar(datos);
+            } catch (error) {
+                console.error("Error conectando al backend:", error);
+                grid.innerHTML = '<p style="color:red; text-align:center;">Error de conexión con PrograWeb.</p>';
+            }
+        }
+
+        // Dibuja las tarjetas en la cuadrícula
+        function renderizar(entidades) {
+            grid.innerHTML = ''; 
+
+            if (entidades.length === 0) {
+                grid.innerHTML = '<p style="text-align:center; grid-column: 1/-1;">No se encontraron registros.</p>';
+                return;
+            }
+
+            entidades.forEach(entidad => {
+                const card = document.createElement('div');
+                card.className = 'card';
+                card.innerHTML = `
+                    <h3>${entidad.nombre} ${entidad.apellido}</h3>
+                    <p>Registro de Entidad</p>
+                    <div class="email-badge">📧 ${entidad.email}</div>
+                `;
+                grid.appendChild(card);
+            });
+        }
+
+        // Se dispara inmediatamente cada vez que el usuario teclea
+        function buscarEntidades() {
+            const termino = inputBusqueda.value;
+            fetchEntidades(termino);
+        }
+
+        // Cargar los datos iniciales (los que creaste desde Thymeleaf) al abrir la página
+        document.addEventListener('DOMContentLoaded', () => fetchEntidades());
+    </script>
+</body>
+</html>
