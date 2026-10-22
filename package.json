@@ -1,0 +1,18 @@
+{
+  "name": "prograweb-e2e",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright end-to-end tests for PrograWeb (page 2)",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:live": "cross-env LIVE=1 playwright test -g @live",
+    "report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.0",
+    "bootstrap": "5.3.3",
+    "cross-env": "^7.0.3",
+    "jquery": "3.7.1"
+  }
+}
