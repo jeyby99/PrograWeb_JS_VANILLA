@@ -3,14 +3,17 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Página 2 - Vanilla JS</title>
+    <title>Página 2 - Rick and Morty</title>
 
-    <!-- Bootstrap 5 (contenedor, input-group, utilidades) -->
+    <!-- Bootstrap 5: contenedor, input-group y botón -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Tailwind (grid responsivo de las tarjetas). Preflight desactivado para no chocar con Bootstrap -->
+    <!-- Tailwind: clases utilitarias (sombra, redondeo). Preflight desactivado para no chocar con Bootstrap -->
     <script src="https://cdn.tailwindcss.com/3.4.17"></script>
-    <script>tailwind.config = { corePlugins: { preflight: false } };</script>
+    <script>if (window.tailwind) { tailwind.config = { corePlugins: { preflight: false } }; }</script>
+
+    <!-- jQuery: todas las peticiones HTTP usan $.ajax -->
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 
     <style>
         :root { --azul: #1a6b8c; }
@@ -18,8 +21,10 @@
         body {
             font-family: Arial, sans-serif;
             background: #fff;
-            padding: 40px 16px;
+            padding: 24px 16px 40px;
         }
+
+        .page { max-width: 900px; margin: 0 auto; }
 
         /* Flexbox: barra de búsqueda */
         .search-container {
@@ -27,19 +32,33 @@
             padding: 20px 40px;
             display: flex;
             justify-content: center;
-            margin-bottom: 24px;
+            margin-bottom: 16px;
         }
-        .search-container input {
-            border-radius: 0;
-            font-size: 16px;
-        }
+        .search-container form { width: 100%; }
+        /* Flexbox propio: la barra se ve bien aunque el CDN de Bootstrap no cargue */
+        .search-container .input-group { display: flex; width: 100%; }
+        .search-container .form-control { flex: 1 1 auto; width: 1%; min-width: 0; padding: 10px; border-radius: 0; font-size: 16px; }
+        .search-container .btn { flex: 0 0 auto; padding: 10px 16px; border-radius: 0; cursor: pointer; }
 
-        #statusIndicator {
+        /* Mensajes de estado (espera, carga, validación, error) */
+        #statusMessage {
             min-height: 24px;
             margin-bottom: 16px;
-            color: #d9534f;
-            font-weight: bold;
             text-align: center;
+            font-weight: bold;
+            color: #555;
+        }
+        #statusMessage[data-state="waiting"],
+        #statusMessage[data-state="invalid"],
+        #statusMessage[data-state="error"] { color: #d9534f; }
+        #statusMessage[data-state="partial"] { color: #b26a00; }
+        #statusMessage[data-state="ok"] { color: #198754; }
+
+        /* CSS Grid: 3 columnas como la maqueta */
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 30px;
         }
 
         /* Flexbox: contenido de cada tarjeta */
@@ -52,228 +71,361 @@
             flex-direction: column;
             align-items: center;
             justify-content: center;
-            min-height: 220px;
+            gap: 6px;
+            min-width: 0;
+            min-height: 100px;
             overflow: hidden;
         }
-        .card-item .tag {
-            font-size: 12px;
-            background: rgba(255,255,255,.2);
-            padding: 2px 8px;
-            margin-bottom: 8px;
-        }
-        .card-item p { margin: 4px 0; font-size: 16px; word-break: break-word; }
-        .card-item .desc { font-size: 13px; opacity: .9; }
+        .card-item p { margin: 0; word-break: break-word; }
+        .card-item .name { font-size: 17px; font-weight: bold; }
+        .card-item .meta { font-size: 13px; opacity: .95; }
         .card-item img {
             width: 96px;
             height: 96px;
-            object-fit: contain;
-            margin-top: 10px;
+            object-fit: cover;
+            margin-top: 6px;
             border: 1px solid #fff;
             background: #fff;
         }
+        .placeholder-card p { font-size: 16px; }
 
-        /* Media Queries */
+        .empty-state {
+            grid-column: 1 / -1;
+            text-align: center;
+            padding: 30px 10px;
+            color: #555;
+        }
+
+        /* Media Queries: 3 columnas en escritorio, 2 en tablet, 1 en celular */
         @media (max-width: 991.98px) {
-            .card-item { min-height: 200px; }
+            .grid-container { grid-template-columns: repeat(2, 1fr); gap: 20px; }
         }
         @media (max-width: 575.98px) {
-            body { padding: 20px 10px; }
-            .search-container { padding: 16px; }
-            .card-item { min-height: 180px; }
+            body { padding: 16px 10px 30px; }
+            .search-container { padding: 14px; }
+            .grid-container { grid-template-columns: 1fr; gap: 14px; }
         }
     </style>
 </head>
 <body>
-<div class="container" style="max-width: 900px;">
+<div class="page">
 
     <!-- Barra de búsqueda -->
     <div class="search-container">
-        <div class="input-group">
-            <input type="text" id="searchInput" class="form-control" placeholder="Barra de busqueda (ej: rick, earth, pika, potion)">
-            <button id="btnBuscar" class="btn btn-light" type="button">Buscar</button>
-        </div>
+        <form id="searchForm" novalidate>
+            <div class="input-group">
+                <input type="text" id="searchInput" class="form-control" autocomplete="off"
+                       aria-label="Buscar personaje" aria-describedby="statusMessage"
+                       placeholder="Barra de busqueda (ej: rick, morty, summer)">
+                <button id="btnBuscar" class="btn btn-light" type="submit">Buscar</button>
+            </div>
+        </form>
     </div>
 
-    <div id="statusIndicator"></div>
+    <div id="statusMessage" role="status" aria-live="polite" data-state="idle"></div>
 
-    <!-- Grid: Tailwind (1 col móvil, 2 tablet, 3 escritorio) sobre el grid propio -->
-    <div id="resultadosGrid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 lg:gap-8"></div>
+    <!-- Cuadrícula de resultados -->
+    <div id="resultadosGrid" class="grid-container"></div>
 </div>
 
 <script>
-    const DEBOUNCE_MS = 4000; // espera de 4 segundos (cámbialo a 500 si quieres más rápido)
+if (!window.jQuery) {
+    document.getElementById('statusMessage').textContent =
+        'No se pudo cargar jQuery. Revisa tu conexión a internet y recarga la página.';
+} else {
+(function ($) {
+    'use strict';
 
-    const inputBusqueda = document.getElementById('searchInput');
-    const btnBuscar = document.getElementById('btnBuscar');
-    const grid = document.getElementById('resultadosGrid');
-    const statusIndicator = document.getElementById('statusIndicator');
-    let timeoutId, cuentaId;
-
-    // Imagen de respaldo (SVG embebido, no depende de internet)
-    const PLACEHOLDER = 'data:image/svg+xml;utf8,' + encodeURIComponent(
+    /* ---------------- Configuración ---------------- */
+    const API_BASE = 'https://rickandmortyapi.com/api';
+    const IMG_HOST = 'https://rickandmortyapi.com/';   // solo se aceptan imágenes de este origen
+    const DEBOUNCE_MS = 4000;                          // espera de 4 segundos
+    const MAX_CARDS = 6;                               // 3 columnas x 2 filas
+    const DEFAULT_QUERY = 'rick';                      // búsqueda inicial
+    const MIN_LEN = 2;
+    const MAX_LEN = 30;
+    const NAME_RE = /^[\p{L}\p{N} .'\-]+$/u;           // letras, números, espacio, punto, apóstrofe, guion
+    const TIMEOUT_MS = 10000;
+    const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#e6eef2"/>' +
-        '<text x="48" y="54" font-size="16" text-anchor="middle" fill="#1a6b8c" font-family="Arial">IMG</text></svg>'
-    );
+        '<text x="48" y="54" font-size="16" text-anchor="middle" fill="#1a6b8c" font-family="Arial">IMG</text></svg>');
 
-    const esc = (t) => String(t ?? '').replace(/[&<>"']/g, c => (
-        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-    ));
+    const $form = $('#searchForm');
+    const $input = $('#searchInput');
+    const $grid = $('#resultadosGrid');
+    const $status = $('#statusMessage');
 
-    /* ---------- Maqueta inicial ---------- */
-    function renderizarMaquetaInicial() {
-        grid.innerHTML = Array.from({ length: 6 }, () => `
-            <div class="card-item shadow-md">
-                <p>Descripcion ,</p>
-                <p>Imagen</p>
-            </div>`).join('');
+    let debounceId = null;
+    let countdownId = null;
+    let searchSeq = 0;      // número de la búsqueda vigente (descarta respuestas viejas)
+    let inflight = [];      // peticiones $.ajax en curso
+
+    /* ---------------- Estado en pantalla ---------------- */
+    function setStatus(state, text) {
+        $status.attr({ 'data-state': state, role: state === 'error' || state === 'invalid' ? 'alert' : 'status' })
+               .text(text);
     }
-    renderizarMaquetaInicial();
-    const BUSQUEDA_INICIAL = 'rick';
 
-    /* ---------- API 1: Rick and Morty (3 endpoints) ---------- */
-    const RM = 'https://rickandmortyapi.com/api';
-    const fuentesRM = [
-        {
-            tipo: 'Personaje',
-            url: q => `${RM}/character/?name=${encodeURIComponent(q)}`,
-            map: i => ({ nombre: i.name, desc: `${i.species} - ${i.status}`, img: i.image })
-        },
-        {
-            tipo: 'Ubicación',
-            url: q => `${RM}/location/?name=${encodeURIComponent(q)}`,
-            map: i => ({ nombre: i.name, desc: `${i.type} - ${i.dimension}`, img: null })
-        },
-        {
-            tipo: 'Episodio',
-            url: q => `${RM}/episode/?name=${encodeURIComponent(q)}`,
-            map: i => ({ nombre: i.name, desc: `${i.episode} - ${i.air_date}`, img: null })
+    function renderPlaceholders() {
+        $grid.empty();
+        for (let i = 0; i < MAX_CARDS; i++) {
+            $('<div class="card-item placeholder-card" aria-hidden="true"></div>')
+                .append($('<p></p>').text('Descripcion ,'))
+                .append($('<p></p>').text('Imagen'))
+                .appendTo($grid);
         }
-    ];
+    }
 
-    /* ---------- API 2: PokéAPI (3 endpoints) ----------
-       PokéAPI no filtra por nombre parcial, así que se descarga la lista una vez,
-       se guarda en caché y se filtra en el navegador. */
-    const POKE = 'https://pokeapi.co/api/v2';
-    const cache = {};
-    async function listaPoke(endpoint) {
-        if (!cache[endpoint]) {
-            const r = await fetch(`${POKE}/${endpoint}?limit=2000`);
-            if (!r.ok) throw new Error(endpoint);
-            cache[endpoint] = (await r.json()).results;
+    function renderEmpty(text) {
+        $grid.empty().append($('<p class="empty-state" data-testid="empty-state"></p>').text(text));
+    }
+
+    /* ---------------- Validación de la entrada (antes de enviar la petición) ---------------- */
+    function validateQuery(raw) {
+        const value = String(raw || '').trim().replace(/\s+/g, ' ');
+        if (value.length < MIN_LEN) return { ok: false, error: 'Escribe al menos ' + MIN_LEN + ' caracteres.' };
+        if (value.length > MAX_LEN) return { ok: false, error: 'Máximo ' + MAX_LEN + ' caracteres.' };
+        if (!NAME_RE.test(value)) {
+            return { ok: false, error: 'Solo se permiten letras, números, espacios, punto, apóstrofe y guion.' };
         }
-        return cache[endpoint];
+        return { ok: true, value: value };
     }
-    const idDeUrl = url => url.split('/').filter(Boolean).pop();
-    const SPR = 'https://raw.githubusercontent.com/PokeAPI/sprites/master/sprites';
 
-    const fuentesPoke = [
-        {
-            tipo: 'Pokémon', endpoint: 'pokemon',
-            map: i => ({ nombre: i.name, desc: `Pokémon #${idDeUrl(i.url)}`,
-                         img: `${SPR}/pokemon/other/official-artwork/${idDeUrl(i.url)}.png` })
-        },
-        {
-            tipo: 'Objeto', endpoint: 'item',
-            map: i => ({ nombre: i.name, desc: 'Objeto Pokémon', img: `${SPR}/items/${i.name}.png` })
-        },
-        {
-            tipo: 'Baya', endpoint: 'berry',
-            map: i => ({ nombre: i.name, desc: 'Baya Pokémon', img: `${SPR}/items/${i.name}-berry.png` })
+    function markInvalid(isInvalid) {
+        $input.toggleClass('is-invalid', isInvalid).attr('aria-invalid', isInvalid ? 'true' : 'false');
+    }
+
+    /* ---------------- Capa de peticiones (jQuery) ---------------- */
+    function ajaxJSON(url) {
+        const xhr = $.ajax({ url: url, method: 'GET', dataType: 'json', timeout: TIMEOUT_MS });
+        inflight.push(xhr);
+        return xhr;
+    }
+
+    function abortInflight() {
+        inflight.forEach(function (xhr) { if (xhr.readyState !== 4) xhr.abort(); });
+        inflight = [];
+    }
+
+    const toArray = function (data) { return Array.isArray(data) ? data : [data]; };
+
+    // Devuelve siempre una promesa que se resuelve: {ok, data}. Así un fallo parcial no tumba todo.
+    function settle(promise) {
+        return promise.then(
+            function (data) { return { ok: true, data: data }; },
+            function () { return { ok: false, data: [] }; }
+        );
+    }
+
+    // Endpoint 1: /character/?name=...
+    function fetchCharacters(name) {
+        return ajaxJSON(API_BASE + '/character/?name=' + encodeURIComponent(name));
+    }
+
+    // Endpoints 2 y 3: /location/{ids} y /episode/{ids} (varios ids en una sola petición)
+    function fetchBatch(kind, ids) {
+        if (!ids.length) return $.Deferred().resolve([]).promise();
+        return ajaxJSON(API_BASE + '/' + kind + '/' + ids.join(',')).then(toArray);
+    }
+
+    /* ---------------- Validación de la respuesta ---------------- */
+    function idFromUrl(url) {
+        const m = /\/(\d+)\/?$/.exec(typeof url === 'string' ? url : '');
+        return m ? Number(m[1]) : null;
+    }
+
+    function uniq(list) {
+        return Array.from(new Set(list.filter(function (x) { return x !== null; })));
+    }
+
+    function indexById(list) {
+        const map = {};
+        list.forEach(function (item) {
+            if (item && Number.isInteger(item.id)) map[item.id] = item;
+        });
+        return map;
+    }
+
+    function validateCharacters(data) {
+        if (!data || !Array.isArray(data.results)) throw new Error('Respuesta inválida: falta "results"');
+        return data.results.filter(function (c) {
+            return c && Number.isInteger(c.id) && typeof c.name === 'string';
+        });
+    }
+
+    const locIdOf = function (c) { return idFromUrl(c.location && c.location.url); };
+    const epIdOf = function (c) { return idFromUrl(Array.isArray(c.episode) ? c.episode[0] : null); };
+
+    /* ---------------- Peticiones concatenadas ----------------
+       1) /character      -> obtiene los personajes
+       2) con sus datos   -> /location/{ids} y /episode/{ids} en paralelo
+       3) se combinan las 3 respuestas en una sola tarjeta por personaje */
+    function buscarPersonajes(name, seq) {
+        return fetchCharacters(name).then(function (data) {
+            const chars = validateCharacters(data).slice(0, MAX_CARDS);
+            if (seq !== searchSeq) return $.Deferred().reject({ stale: true }).promise();
+
+            const locIds = uniq(chars.map(locIdOf));
+            const epIds = uniq(chars.map(epIdOf));
+
+            return $.when(
+                settle(fetchBatch('location', locIds)),
+                settle(fetchBatch('episode', epIds))
+            ).then(function (locRes, epRes) {
+                return {
+                    chars: chars,
+                    locations: indexById(locRes.data),
+                    episodes: indexById(epRes.data),
+                    partial: !locRes.ok || !epRes.ok
+                };
+            });
+        });
+    }
+
+    /* ---------------- Dibujar tarjetas (con .text(): sin riesgo de inyección HTML) ---------------- */
+    function buildCard(c, locations, episodes) {
+        const loc = locations[locIdOf(c)];
+        const ep = episodes[epIdOf(c)];
+        const $card = $('<article class="card-item shadow-md" data-testid="character-card"></article>');
+
+        $('<p class="name"></p>').text(c.name).appendTo($card);
+        $('<p class="meta"></p>').text((c.species || 'Desconocido') + ' · ' + (c.status || 'unknown')).appendTo($card);
+
+        const locName = loc ? loc.name : (c.location && c.location.name) || 'Desconocida';
+        $('<p class="meta"></p>').text('Ubicación: ' + locName + (loc && loc.type ? ' (' + loc.type + ')' : '')).appendTo($card);
+        if (loc && loc.dimension && loc.dimension !== 'unknown') {
+            $('<p class="meta"></p>').text('Dimensión: ' + loc.dimension).appendTo($card);
         }
-    ];
+        $('<p class="meta"></p>')
+            .text('Primer episodio: ' + (ep ? ep.episode + ' - ' + ep.name : 'No disponible'))
+            .appendTo($card);
 
-    /* ---------- Búsqueda en las 6 fuentes ---------- */
-    async function buscarRM(fuente, q) {
-        const r = await fetch(fuente.url(q));
-        if (!r.ok) return []; // 404 = sin coincidencias
-        const data = await r.json();
-        return (data.results || []).map(fuente.map).map(x => ({ ...x, tipo: fuente.tipo }));
+        const src = typeof c.image === 'string' && c.image.indexOf(IMG_HOST) === 0 ? c.image : FALLBACK_IMG;
+        $('<img>').attr({ src: src, alt: c.name, loading: 'lazy' })
+            .on('error', function () { $(this).off('error').attr('src', FALLBACK_IMG); })
+            .appendTo($card);
+
+        return $card;
     }
 
-    async function buscarPoke(fuente, q) {
-        const lista = await listaPoke(fuente.endpoint);
-        return lista
-            .filter(i => i.name.includes(q.toLowerCase()))
-            .map(fuente.map)
-            .map(x => ({ ...x, tipo: fuente.tipo }));
+    function renderCards(result) {
+        $grid.empty();
+        result.chars.forEach(function (c) {
+            $grid.append(buildCard(c, result.locations, result.episodes));
+        });
     }
 
-    async function ejecutarBusqueda(query) {
-        statusIndicator.style.color = '#d9534f';
-        statusIndicator.textContent = '🚀 Consultando APIs...';
+    /* ---------------- Ejecutar una búsqueda ---------------- */
+    function runSearch(query) {
+        abortInflight();
+        const seq = ++searchSeq;
+        setStatus('loading', '🔎 Buscando "' + query + '"...');
 
-        const tareas = [
-            ...fuentesRM.map(f => buscarRM(f, query)),
-            ...fuentesPoke.map(f => buscarPoke(f, query))
-        ];
-        const respuestas = await Promise.allSettled(tareas);
-
-        const listas = respuestas.map(r => r.status === 'fulfilled' ? r.value : []);
-        const fallos = respuestas.filter(r => r.status === 'rejected').length;
-
-        // Mezcla balanceada: 1 de cada endpoint por ronda, hasta 6 tarjetas
-        const resultados = [];
-        for (let ronda = 0; resultados.length < 6; ronda++) {
-            let agregado = false;
-            for (const lista of listas) {
-                if (lista[ronda] && resultados.length < 6) {
-                    resultados.push(lista[ronda]);
-                    agregado = true;
+        buscarPersonajes(query, seq)
+            .then(function (result) {
+                if (seq !== searchSeq) return;
+                if (!result.chars.length) {
+                    setStatus('empty', 'No se encontraron resultados para "' + query + '".');
+                    renderEmpty('Sin resultados. Prueba con otro nombre.');
+                    return;
                 }
-            }
-            if (!agregado) break;
-        }
-
-        if (resultados.length === 0) {
-            statusIndicator.textContent = fallos === tareas.length
-                ? '❌ Error de conexión con las APIs.'
-                : 'No se encontraron resultados. Prueba con otro nombre.';
-            renderizarMaquetaInicial();
-            return;
-        }
-
-        statusIndicator.style.color = '#198754';
-        statusIndicator.textContent = '✅ Resultados mostrados.';
-
-        grid.innerHTML = resultados.map(r => `
-            <div class="card-item shadow-md">
-                <span class="tag">${esc(r.tipo)}</span>
-                <p>${esc(r.nombre)} ,</p>
-                <p class="desc">${esc(r.desc)}</p>
-                <img src="${esc(r.img || PLACEHOLDER)}" alt="${esc(r.nombre)}" loading="lazy"
-                     onerror="this.onerror=null;this.src='${PLACEHOLDER.replace(/'/g, "\\'")}'">
-            </div>`).join('');
+                renderCards(result);
+                if (result.partial) {
+                    setStatus('partial', '⚠️ Algunos detalles (ubicación o episodio) no están disponibles.');
+                } else {
+                    setStatus('ok', '✅ ' + result.chars.length + ' resultado(s) para "' + query + '".');
+                }
+            })
+            .catch(function (a, b) {
+                if (seq !== searchSeq) return;
+                if (a && a.stale) return;
+                if (b === 'abort') return;
+                if (a && a.status === 404) {          // la API responde 404 cuando no hay coincidencias
+                    setStatus('empty', 'No se encontraron resultados para "' + query + '".');
+                    renderEmpty('Sin resultados. Prueba con otro nombre.');
+                    return;
+                }
+                let msg = '⚠️ La respuesta de la API no es válida.';
+                if (b === 'timeout') msg = '⌛ La API tardó demasiado en responder. Intenta de nuevo.';
+                else if (a && a.status === 429) msg = '🚦 Demasiadas peticiones a la API. Espera un momento.';
+                else if (a && a.status >= 500) msg = '❌ La API tuvo un problema (error ' + a.status + ').';
+                else if (a && a.status === 0) msg = '📡 Sin conexión con la API.';
+                setStatus('error', msg);
+                renderEmpty('No se pudieron cargar los personajes.');
+            });
     }
 
-    /* ---------- Debounce + Enter + botón ---------- */
-    inputBusqueda.addEventListener('input', () => {
-        const query = inputBusqueda.value.trim();
-        clearTimeout(timeoutId);
+    /* ---------------- Debounce de 4 segundos ---------------- */
+    function clearTimers() {
+        clearTimeout(debounceId);
+        clearInterval(countdownId);
+        debounceId = countdownId = null;
+    }
 
-        clearInterval(cuentaId);
-        if (query === '') {
-            statusIndicator.textContent = '';
-            ejecutarBusqueda(BUSQUEDA_INICIAL);
+    function startDebounce(query) {
+        let restante = DEBOUNCE_MS / 1000;
+        const pintar = function () {
+            setStatus('waiting', '⏳ Buscando en ' + restante + ' s (debounce)... o presiona Enter');
+        };
+        pintar();
+        countdownId = setInterval(function () {
+            restante--;
+            if (restante > 0) pintar(); else clearInterval(countdownId);
+        }, 1000);
+        debounceId = setTimeout(function () {
+            clearInterval(countdownId);
+            runSearch(query);
+        }, DEBOUNCE_MS);
+    }
+
+    // Al escribir: valida y, si es válido, espera 4 s sin teclear antes de buscar
+    $input.on('input', function () {
+        clearTimers();
+        const raw = $input.val();
+
+        if (raw.trim() === '') {                     // campo vacío: vuelven los resultados iniciales
+            markInvalid(false);
+            runSearch(DEFAULT_QUERY);
             return;
         }
-        // Cuenta regresiva visible para que se note que sí está esperando
-        let restante = DEBOUNCE_MS / 1000;
-        statusIndicator.style.color = '#d9534f';
-        const pintar = () => statusIndicator.textContent = `⏳ Buscando en ${restante} s (debounce)... o presiona Enter`;
-        pintar();
-        cuentaId = setInterval(() => { restante--; if (restante > 0) pintar(); else clearInterval(cuentaId); }, 1000);
-        timeoutId = setTimeout(() => { clearInterval(cuentaId); ejecutarBusqueda(query); }, DEBOUNCE_MS);
+        const check = validateQuery(raw);
+        if (!check.ok) {
+            markInvalid(true);
+            abortInflight();
+            setStatus('invalid', '🚫 ' + check.error);
+            return;
+        }
+        markInvalid(false);
+        startDebounce(check.value);
     });
 
-    function buscarYa() {
-        const query = inputBusqueda.value.trim();
-        if (!query) return;
-        clearTimeout(timeoutId); clearInterval(cuentaId);
-        ejecutarBusqueda(query);
-    }
-    btnBuscar.addEventListener('click', buscarYa);
-    inputBusqueda.addEventListener('keydown', e => { if (e.key === 'Enter') buscarYa(); });
-    document.addEventListener('DOMContentLoaded', () => ejecutarBusqueda(BUSQUEDA_INICIAL));
+    // Enter o botón Buscar: busca sin esperar
+    $form.on('submit', function (e) {
+        e.preventDefault();
+        clearTimers();
+        const raw = $input.val();
+        if (raw.trim() === '') {
+            markInvalid(false);
+            runSearch(DEFAULT_QUERY);
+            return;
+        }
+        const check = validateQuery(raw);
+        if (!check.ok) {
+            markInvalid(true);
+            setStatus('invalid', '🚫 ' + check.error);
+            return;
+        }
+        markInvalid(false);
+        runSearch(check.value);
+    });
+
+    /* ---------------- Inicio: se muestran Ricks al abrir la página ---------------- */
+    $(function () {
+        renderPlaceholders();
+        runSearch(DEFAULT_QUERY);
+    });
+})(window.jQuery);
+}
 </script>
 </body>
 </html>
