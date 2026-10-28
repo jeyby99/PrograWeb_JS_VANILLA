@@ -116,7 +116,7 @@
             <div class="input-group">
                 <input type="text" id="searchInput" class="form-control" autocomplete="off"
                        aria-label="Buscar personaje" aria-describedby="statusMessage"
-                       placeholder="Barra de busqueda (ej: rick, morty, summer)">
+                       placeholder="Barra de busqueda (ej: rick, morty temporada 4, morty cap 2, S04E02)">
                 <button id="btnBuscar" class="btn btn-light" type="submit">Buscar</button>
             </div>
         </form>
@@ -188,7 +188,46 @@ if (!window.jQuery) {
         if (!NAME_RE.test(value)) {
             return { ok: false, error: 'Solo se permiten letras, números, espacios, punto, apóstrofe y guion.' };
         }
+        const parsed = parseQuery(value);
+        if (!parsed.ok) return { ok: false, error: parsed.error };
         return { ok: true, value: value };
+    }
+
+    /* ---------------- Query parsing: name + optional season / episode ----------------
+       The /episode endpoint filters by episode code and accepts partial codes:
+       "S04" = whole season 4, "E04" = episode 4 of every season, "S04E02" = one episode.
+       Examples: "morty temporada 4" -> {name: "morty", code: "S04"}
+                 "morty cap 4"       -> {name: "morty", code: "E04"}
+                 "morty T4 cap 2"    -> {name: "morty", code: "S04E02"} */
+    const CODE_RE = /\bs\s*(\d{1,2})\s*e\s*(\d{1,2})\b/;
+    const SEASON_RE = /\b(?:temporada|temp|season|t|s)\s*(\d{1,2})\b/;
+    const EPISODE_RE = /\b(?:capitulo|cap|episodio|episode|ep|e)\s*(\d{1,2})\b/;
+    const FILLER_RE = /\b(?:de|del|la|el|en|y|in|of|the|and|from)\b/g;
+
+    // Lower case without accents, so "Capítulo" and "capitulo" match the same way.
+    const normalize = function (s) {
+        return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    };
+    const pad2 = function (n) { return String(Number(n)).padStart(2, '0'); };
+
+    function parseQuery(value) {
+        let rest = ' ' + normalize(value) + ' ';
+        let season = null;
+        let episode = null;
+
+        let m = CODE_RE.exec(rest);
+        if (m) { season = m[1]; episode = m[2]; rest = rest.replace(m[0], ' '); }
+        if (season === null && (m = SEASON_RE.exec(rest))) { season = m[1]; rest = rest.replace(m[0], ' '); }
+        if (episode === null && (m = EPISODE_RE.exec(rest))) { episode = m[1]; rest = rest.replace(m[0], ' '); }
+
+        if ((season !== null && Number(season) < 1) || (episode !== null && Number(episode) < 1)) {
+            return { ok: false, error: 'La temporada y el capítulo deben ser mayores que 0.' };
+        }
+        if (season === null && episode === null) return { ok: true, name: value, code: null };
+
+        const code = (season !== null ? 'S' + pad2(season) : '') + (episode !== null ? 'E' + pad2(episode) : '');
+        const name = rest.replace(FILLER_RE, ' ').replace(/\s+/g, ' ').trim();
+        return { ok: true, name: name, code: code };
     }
 
     function markInvalid(isInvalid) {
@@ -222,7 +261,12 @@ if (!window.jQuery) {
         return ajaxJSON(API_BASE + '/character/?name=' + encodeURIComponent(name));
     }
 
-    // Endpoints 2 and 3: /location/{ids} and /episode/{ids} (several ids in one request)
+    // Endpoint 3 used as a filter: /episode/?episode=S04 (season), E04 (episode number) or S04E02
+    function fetchEpisodesByCode(code) {
+        return ajaxJSON(API_BASE + '/episode/?episode=' + encodeURIComponent(code));
+    }
+
+    // Batches: /character/{ids}, /location/{ids} and /episode/{ids} (several ids in one request)
     function fetchBatch(kind, ids) {
         if (!ids.length) return $.Deferred().resolve([]).promise();
         return ajaxJSON(API_BASE + '/' + kind + '/' + ids.join(',')).then(toArray);
@@ -253,6 +297,13 @@ if (!window.jQuery) {
         });
     }
 
+    function validateEpisodes(data) {
+        if (!data || !Array.isArray(data.results)) throw new Error('Respuesta inválida: falta "results"');
+        return data.results.filter(function (e) {
+            return e && Number.isInteger(e.id) && typeof e.episode === 'string' && Array.isArray(e.characters);
+        });
+    }
+
     const locIdOf = function (c) { return idFromUrl(c.location && c.location.url); };
     const epIdOf = function (c) { return idFromUrl(Array.isArray(c.episode) ? c.episode[0] : null); };
 
@@ -272,20 +323,60 @@ if (!window.jQuery) {
                 settle(fetchBatch('location', locIds)),
                 settle(fetchBatch('episode', epIds))
             ).then(function (locRes, epRes) {
+                const episodes = indexById(epRes.data);
                 return {
                     chars: chars,
                     locations: indexById(locRes.data),
-                    episodes: indexById(epRes.data),
+                    episodeLabel: 'Primer episodio',
+                    episodeFor: function (c) { return episodes[epIdOf(c)]; },
                     partial: !locRes.ok || !epRes.ok
                 };
             });
         });
     }
 
+    /* ---------------- Chained requests with a season / episode filter ----------------
+       1) /episode?episode=CODE -> matching episodes and the ids of their characters
+       2) /character/{ids}      -> those characters, filtered by name on the client
+       3) /location/{ids}       -> location details for the cards shown
+       The card shows the first matching episode the character appears in. */
+    function buscarPorEpisodio(name, code, seq) {
+        return fetchEpisodesByCode(code).then(function (data) {
+            const episodes = validateEpisodes(data);
+            if (seq !== searchSeq) return $.Deferred().reject({ stale: true }).promise();
+
+            const matchOf = {};          // character id -> first matching episode
+            episodes.forEach(function (ep) {
+                ep.characters.forEach(function (url) {
+                    const id = idFromUrl(url);
+                    if (id !== null && !matchOf[id]) matchOf[id] = ep;
+                });
+            });
+
+            return fetchBatch('character', Object.keys(matchOf).map(Number)).then(function (list) {
+                if (seq !== searchSeq) return $.Deferred().reject({ stale: true }).promise();
+                const wanted = normalize(name);
+                const chars = validateCharacters({ results: list })
+                    .filter(function (c) { return normalize(c.name).indexOf(wanted) !== -1; })
+                    .slice(0, MAX_CARDS);
+
+                return settle(fetchBatch('location', uniq(chars.map(locIdOf)))).then(function (locRes) {
+                    return {
+                        chars: chars,
+                        locations: indexById(locRes.data),
+                        episodeLabel: 'Episodio',
+                        episodeFor: function (c) { return matchOf[c.id]; },
+                        partial: !locRes.ok
+                    };
+                });
+            });
+        });
+    }
+
     /* ---------------- Render cards (using .text(): no HTML injection risk) ---------------- */
-    function buildCard(c, locations, episodes) {
-        const loc = locations[locIdOf(c)];
-        const ep = episodes[epIdOf(c)];
+    function buildCard(c, result) {
+        const loc = result.locations[locIdOf(c)];
+        const ep = result.episodeFor(c);
         const $card = $('<article class="card-item shadow-md" data-testid="character-card"></article>');
 
         $('<p class="name"></p>').text(c.name).appendTo($card);
@@ -297,7 +388,7 @@ if (!window.jQuery) {
             $('<p class="meta"></p>').text('Dimensión: ' + loc.dimension).appendTo($card);
         }
         $('<p class="meta"></p>')
-            .text('Primer episodio: ' + (ep ? ep.episode + ' - ' + ep.name : 'No disponible'))
+            .text(result.episodeLabel + ': ' + (ep ? ep.episode + ' - ' + ep.name : 'No disponible'))
             .appendTo($card);
 
         const src = typeof c.image === 'string' && c.image.indexOf(IMG_HOST) === 0 ? c.image : FALLBACK_IMG;
@@ -311,7 +402,7 @@ if (!window.jQuery) {
     function renderCards(result) {
         $grid.empty();
         result.chars.forEach(function (c) {
-            $grid.append(buildCard(c, result.locations, result.episodes));
+            $grid.append(buildCard(c, result));
         });
     }
 
@@ -321,7 +412,12 @@ if (!window.jQuery) {
         const seq = ++searchSeq;
         setStatus('loading', '🔎 Buscando "' + query + '"...');
 
-        buscarPersonajes(query, seq)
+        const parsed = parseQuery(query);
+        const search = parsed.code
+            ? buscarPorEpisodio(parsed.name, parsed.code, seq)
+            : buscarPersonajes(parsed.name, seq);
+
+        search
             .then(function (result) {
                 if (seq !== searchSeq) return;
                 if (!result.chars.length) {
