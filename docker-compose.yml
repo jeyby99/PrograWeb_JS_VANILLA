@@ -1,0 +1,34 @@
+# Starts PrograWeb + PostgreSQL:  docker compose up --build
+# Credentials can be overridden with a .env file (see .env.example).
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: PrograWeb
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-1234}
+    ports:
+      - "5433:5432"   # host port 5433 to avoid clashing with a local PostgreSQL
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d PrograWeb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    image: ghcr.io/jeyby99/prograweb:latest
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
+      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-1234}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
