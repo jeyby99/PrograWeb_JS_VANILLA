@@ -3,3 +3,4 @@ nbproject/private/
 node_modules/
 test-results/
 playwright-report/
+.env
