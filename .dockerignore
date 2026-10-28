@@ -4,3 +4,6 @@ test-results/
 playwright-report/
 .git/
 .vscode/
+e2e/
+.github/
+.env
