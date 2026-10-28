@@ -1,0 +1,9 @@
+target/
+node_modules/
+test-results/
+playwright-report/
+.git/
+.vscode/
+e2e/
+.github/
+.env

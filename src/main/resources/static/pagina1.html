@@ -51,21 +51,21 @@
     <h1>Directorio de Entidades</h1>
     
     <div class="search-container">
-        <!-- Input con evento 'oninput' para búsqueda en tiempo real -->
+        <!-- Input with an 'oninput' event for real-time search -->
         <input type="text" id="searchInput" placeholder="Buscar por nombre en tiempo real..." oninput="buscarEntidades()">
     </div>
 
     <div id="entidadesGrid" class="grid-container">
-        <!-- Los datos se inyectarán aquí -->
+        <!-- Results are rendered here -->
     </div>
 
     <script>
-        // URL de tu backend PrograWeb
-        const apiURL = 'http://localhost:8080/api/entidades';
+        // PrograWeb backend URL
+        const apiURL = '/api/entidades';
         const grid = document.getElementById('entidadesGrid');
         const inputBusqueda = document.getElementById('searchInput');
 
-        // Función principal para consumir el backend
+        // Main function that calls the backend
         async function fetchEntidades(query = '') {
             try {
                 const url = query ? `${apiURL}?query=${query}` : apiURL;
@@ -78,7 +78,7 @@
             }
         }
 
-        // Dibuja las tarjetas en la cuadrícula
+        // Renders the cards in the grid
         function renderizar(entidades) {
             grid.innerHTML = ''; 
 
@@ -99,13 +99,13 @@
             });
         }
 
-        // Se dispara inmediatamente cada vez que el usuario teclea
+        // Fires immediately every time the user types
         function buscarEntidades() {
             const termino = inputBusqueda.value;
             fetchEntidades(termino);
         }
 
-        // Cargar los datos iniciales (los que creaste desde Thymeleaf) al abrir la página
+        // Load the initial data (created from the Thymeleaf CRUD) when the page opens
         document.addEventListener('DOMContentLoaded', () => fetchEntidades());
     </script>
 </body>

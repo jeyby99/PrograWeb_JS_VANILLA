@@ -7,6 +7,6 @@ import java.util.List;
 
 @Repository
 public interface EntidadRepository extends JpaRepository<Entidad, Long> {
-    // Método mágico de Spring para buscar por nombre ignorando mayúsculas/minúsculas
+    // Spring derived query: search by name, case-insensitive
     List<Entidad> findByNombreContainingIgnoreCase(String nombre);
 }

@@ -1,10 +1,10 @@
-// Configuración de Playwright para probar pagina2.html
+// Playwright configuration to test pagina2.html
 //
-// Uso normal:        npm test
-//   -> levanta un servidor estático en http://localhost:4173 que sirve src/main/resources/static
-//      (no necesita Spring Boot ni PostgreSQL: la página 2 solo usa la API de Rick and Morty).
+// Default usage:     npm test
+//   -> starts a static server on http://localhost:4173 serving src/main/resources/static
+//      (no Spring Boot or PostgreSQL needed: page 2 only uses the Rick and Morty API).
 //
-// Contra tu app Spring Boot ya iniciada:
+// Against an already running Spring Boot app:
 //   Windows (cmd):         set BASE_URL=http://localhost:8080 && npm test
 //   Windows (PowerShell):  $env:BASE_URL="http://localhost:8080"; npm test
 const { defineConfig, devices } = require('@playwright/test');
@@ -16,7 +16,8 @@ module.exports = defineConfig({
   timeout: 30_000,
   expect: { timeout: 5_000 },
   fullyParallel: true,
-  retries: 0,
+  // Retry on CI only: a few tests are timing-based (debounce / chained requests).
+  retries: process.env.CI ? 2 : 0,
   reporter: [['list'], ['html', { open: 'never' }]],
   use: {
     baseURL: BASE_URL,
