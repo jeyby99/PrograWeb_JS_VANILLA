@@ -5,14 +5,14 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Página 2 - Rick and Morty</title>
 
-    <!-- Bootstrap 5: contenedor, input-group y botón -->
+    <!-- Bootstrap 5: container, input-group and button -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
 
-    <!-- Tailwind: clases utilitarias (sombra, redondeo). Preflight desactivado para no chocar con Bootstrap -->
+    <!-- Tailwind: utility classes (shadow, rounding). Preflight disabled so it does not clash with Bootstrap -->
     <script src="https://cdn.tailwindcss.com/3.4.17"></script>
     <script>if (window.tailwind) { tailwind.config = { corePlugins: { preflight: false } }; }</script>
 
-    <!-- jQuery: todas las peticiones HTTP usan $.ajax -->
+    <!-- jQuery: every HTTP request uses $.ajax -->
     <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
 
     <style>
@@ -26,7 +26,7 @@
 
         .page { max-width: 900px; margin: 0 auto; }
 
-        /* Flexbox: barra de búsqueda */
+        /* Flexbox: search bar */
         .search-container {
             background: var(--azul);
             padding: 20px 40px;
@@ -35,12 +35,12 @@
             margin-bottom: 16px;
         }
         .search-container form { width: 100%; }
-        /* Flexbox propio: la barra se ve bien aunque el CDN de Bootstrap no cargue */
+        /* Own Flexbox: the bar still looks right if the Bootstrap CDN fails to load */
         .search-container .input-group { display: flex; width: 100%; }
         .search-container .form-control { flex: 1 1 auto; width: 1%; min-width: 0; padding: 10px; border-radius: 0; font-size: 16px; }
         .search-container .btn { flex: 0 0 auto; padding: 10px 16px; border-radius: 0; cursor: pointer; }
 
-        /* Mensajes de estado (espera, carga, validación, error) */
+        /* Status messages (waiting, loading, validation, error) */
         #statusMessage {
             min-height: 24px;
             margin-bottom: 16px;
@@ -54,14 +54,14 @@
         #statusMessage[data-state="partial"] { color: #b26a00; }
         #statusMessage[data-state="ok"] { color: #198754; }
 
-        /* CSS Grid: 3 columnas como la maqueta */
+        /* CSS Grid: 3 columns, as in the mockup */
         .grid-container {
             display: grid;
             grid-template-columns: repeat(3, 1fr);
             gap: 30px;
         }
 
-        /* Flexbox: contenido de cada tarjeta */
+        /* Flexbox: content of each card */
         .card-item {
             background: var(--azul);
             color: #fff;
@@ -96,7 +96,7 @@
             color: #555;
         }
 
-        /* Media Queries: 3 columnas en escritorio, 2 en tablet, 1 en celular */
+        /* Media queries: 3 columns on desktop, 2 on tablet, 1 on mobile */
         @media (max-width: 991.98px) {
             .grid-container { grid-template-columns: repeat(2, 1fr); gap: 20px; }
         }
@@ -110,7 +110,7 @@
 <body>
 <div class="page">
 
-    <!-- Barra de búsqueda -->
+    <!-- Search bar -->
     <div class="search-container">
         <form id="searchForm" novalidate>
             <div class="input-group">
@@ -124,7 +124,7 @@
 
     <div id="statusMessage" role="status" aria-live="polite" data-state="idle"></div>
 
-    <!-- Cuadrícula de resultados -->
+    <!-- Results grid -->
     <div id="resultadosGrid" class="grid-container"></div>
 </div>
 
@@ -136,15 +136,15 @@ if (!window.jQuery) {
 (function ($) {
     'use strict';
 
-    /* ---------------- Configuración ---------------- */
+    /* ---------------- Configuration ---------------- */
     const API_BASE = 'https://rickandmortyapi.com/api';
-    const IMG_HOST = 'https://rickandmortyapi.com/';   // solo se aceptan imágenes de este origen
-    const DEBOUNCE_MS = 4000;                          // espera de 4 segundos
-    const MAX_CARDS = 6;                               // 3 columnas x 2 filas
-    const DEFAULT_QUERY = 'rick';                      // búsqueda inicial
+    const IMG_HOST = 'https://rickandmortyapi.com/';   // only images from this origin are accepted
+    const DEBOUNCE_MS = 4000;                          // 4-second wait
+    const MAX_CARDS = 6;                               // 3 columns x 2 rows
+    const DEFAULT_QUERY = 'rick';                      // initial search
     const MIN_LEN = 2;
     const MAX_LEN = 30;
-    const NAME_RE = /^[\p{L}\p{N} .'\-]+$/u;           // letras, números, espacio, punto, apóstrofe, guion
+    const NAME_RE = /^[\p{L}\p{N} .'\-]+$/u;           // letters, digits, space, dot, apostrophe, hyphen
     const TIMEOUT_MS = 10000;
     const FALLBACK_IMG = 'data:image/svg+xml;utf8,' + encodeURIComponent(
         '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><rect width="96" height="96" fill="#e6eef2"/>' +
@@ -157,10 +157,10 @@ if (!window.jQuery) {
 
     let debounceId = null;
     let countdownId = null;
-    let searchSeq = 0;      // número de la búsqueda vigente (descarta respuestas viejas)
-    let inflight = [];      // peticiones $.ajax en curso
+    let searchSeq = 0;      // id of the current search (stale responses are dropped)
+    let inflight = [];      // $.ajax requests in flight
 
-    /* ---------------- Estado en pantalla ---------------- */
+    /* ---------------- On-screen status ---------------- */
     function setStatus(state, text) {
         $status.attr({ 'data-state': state, role: state === 'error' || state === 'invalid' ? 'alert' : 'status' })
                .text(text);
@@ -180,7 +180,7 @@ if (!window.jQuery) {
         $grid.empty().append($('<p class="empty-state" data-testid="empty-state"></p>').text(text));
     }
 
-    /* ---------------- Validación de la entrada (antes de enviar la petición) ---------------- */
+    /* ---------------- Input validation (before sending the request) ---------------- */
     function validateQuery(raw) {
         const value = String(raw || '').trim().replace(/\s+/g, ' ');
         if (value.length < MIN_LEN) return { ok: false, error: 'Escribe al menos ' + MIN_LEN + ' caracteres.' };
@@ -195,7 +195,7 @@ if (!window.jQuery) {
         $input.toggleClass('is-invalid', isInvalid).attr('aria-invalid', isInvalid ? 'true' : 'false');
     }
 
-    /* ---------------- Capa de peticiones (jQuery) ---------------- */
+    /* ---------------- Request layer (jQuery) ---------------- */
     function ajaxJSON(url) {
         const xhr = $.ajax({ url: url, method: 'GET', dataType: 'json', timeout: TIMEOUT_MS });
         inflight.push(xhr);
@@ -209,7 +209,7 @@ if (!window.jQuery) {
 
     const toArray = function (data) { return Array.isArray(data) ? data : [data]; };
 
-    // Devuelve siempre una promesa que se resuelve: {ok, data}. Así un fallo parcial no tumba todo.
+    // Always returns a promise that resolves to {ok, data}, so a partial failure does not break everything.
     function settle(promise) {
         return promise.then(
             function (data) { return { ok: true, data: data }; },
@@ -222,13 +222,13 @@ if (!window.jQuery) {
         return ajaxJSON(API_BASE + '/character/?name=' + encodeURIComponent(name));
     }
 
-    // Endpoints 2 y 3: /location/{ids} y /episode/{ids} (varios ids en una sola petición)
+    // Endpoints 2 and 3: /location/{ids} and /episode/{ids} (several ids in one request)
     function fetchBatch(kind, ids) {
         if (!ids.length) return $.Deferred().resolve([]).promise();
         return ajaxJSON(API_BASE + '/' + kind + '/' + ids.join(',')).then(toArray);
     }
 
-    /* ---------------- Validación de la respuesta ---------------- */
+    /* ---------------- Response validation ---------------- */
     function idFromUrl(url) {
         const m = /\/(\d+)\/?$/.exec(typeof url === 'string' ? url : '');
         return m ? Number(m[1]) : null;
@@ -256,10 +256,10 @@ if (!window.jQuery) {
     const locIdOf = function (c) { return idFromUrl(c.location && c.location.url); };
     const epIdOf = function (c) { return idFromUrl(Array.isArray(c.episode) ? c.episode[0] : null); };
 
-    /* ---------------- Peticiones concatenadas ----------------
-       1) /character      -> obtiene los personajes
-       2) con sus datos   -> /location/{ids} y /episode/{ids} en paralelo
-       3) se combinan las 3 respuestas en una sola tarjeta por personaje */
+    /* ---------------- Chained requests ----------------
+       1) /character      -> gets the characters
+       2) with that data  -> /location/{ids} and /episode/{ids} in parallel
+       3) the 3 responses are combined into one card per character */
     function buscarPersonajes(name, seq) {
         return fetchCharacters(name).then(function (data) {
             const chars = validateCharacters(data).slice(0, MAX_CARDS);
@@ -282,7 +282,7 @@ if (!window.jQuery) {
         });
     }
 
-    /* ---------------- Dibujar tarjetas (con .text(): sin riesgo de inyección HTML) ---------------- */
+    /* ---------------- Render cards (using .text(): no HTML injection risk) ---------------- */
     function buildCard(c, locations, episodes) {
         const loc = locations[locIdOf(c)];
         const ep = episodes[epIdOf(c)];
@@ -315,7 +315,7 @@ if (!window.jQuery) {
         });
     }
 
-    /* ---------------- Ejecutar una búsqueda ---------------- */
+    /* ---------------- Run a search ---------------- */
     function runSearch(query) {
         abortInflight();
         const seq = ++searchSeq;
@@ -340,7 +340,7 @@ if (!window.jQuery) {
                 if (seq !== searchSeq) return;
                 if (a && a.stale) return;
                 if (b === 'abort') return;
-                if (a && a.status === 404) {          // la API responde 404 cuando no hay coincidencias
+                if (a && a.status === 404) {          // the API answers 404 when nothing matches
                     setStatus('empty', 'No se encontraron resultados para "' + query + '".');
                     renderEmpty('Sin resultados. Prueba con otro nombre.');
                     return;
@@ -355,7 +355,7 @@ if (!window.jQuery) {
             });
     }
 
-    /* ---------------- Debounce de 4 segundos ---------------- */
+    /* ---------------- 4-second debounce ---------------- */
     function clearTimers() {
         clearTimeout(debounceId);
         clearInterval(countdownId);
@@ -378,12 +378,12 @@ if (!window.jQuery) {
         }, DEBOUNCE_MS);
     }
 
-    // Al escribir: valida y, si es válido, espera 4 s sin teclear antes de buscar
+    // On typing: validate and, if valid, wait 4 s without typing before searching
     $input.on('input', function () {
         clearTimers();
         const raw = $input.val();
 
-        if (raw.trim() === '') {                     // campo vacío: vuelven los resultados iniciales
+        if (raw.trim() === '') {                     // empty field: restore the initial results
             markInvalid(false);
             runSearch(DEFAULT_QUERY);
             return;
@@ -399,7 +399,7 @@ if (!window.jQuery) {
         startDebounce(check.value);
     });
 
-    // Enter o botón Buscar: busca sin esperar
+    // Enter or the Search button: search without waiting
     $form.on('submit', function (e) {
         e.preventDefault();
         clearTimers();
@@ -419,7 +419,7 @@ if (!window.jQuery) {
         runSearch(check.value);
     });
 
-    /* ---------------- Inicio: se muestran Ricks al abrir la página ---------------- */
+    /* ---------------- Startup: show Ricks when the page opens ---------------- */
     $(function () {
         renderPlaceholders();
         runSearch(DEFAULT_QUERY);
