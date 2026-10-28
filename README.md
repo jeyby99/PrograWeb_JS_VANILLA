@@ -15,7 +15,10 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 9. [Features](#features)
 10. [Testing with Playwright](#testing-with-playwright)
 11. [How to Run](#how-to-run)
-12. [Author](#author)
+12. [Run with Docker](#run-with-docker)
+13. [CI/CD](#cicd)
+14. [Development Workflow](#development-workflow)
+15. [Author](#author)
 
 ## Objectives
 
@@ -44,13 +47,13 @@ Build a full-stack web application that connects a Spring Boot REST backend to a
 **Not included**
 - User authentication or authorization.
 - Automated tests for the Java backend and for Page 1.
-- Deployment to a production server (the app runs locally).
+- Deployment to a production server (the app runs locally or with Docker; the image is published to GHCR).
 
 ## Languages
 
 | Language | Where it is used |
 |---|---|
-| **Java 25** | Backend: controllers, services, repositories and model |
+| **Java 17** | Backend: controllers, services, repositories and model |
 | **JavaScript (ES6+)** | Frontend logic and Playwright tests |
 | **HTML5** | Page structure and Thymeleaf templates |
 | **CSS3** | Styling, Grid, Flexbox and Media Queries |
@@ -64,6 +67,9 @@ Build a full-stack web application that connects a Spring Boot REST backend to a
 - **Responsive design:** Bootstrap 5, Tailwind CSS, CSS Grid, Flexbox, Media Queries
 - **External API:** [Rick and Morty API](https://rickandmortyapi.com) (3 endpoints: `character`, `location`, `episode`)
 - **Testing:** Playwright (`@playwright/test`) on Node.js
+- **Containers:** Docker (multi-stage image), Docker Compose (app + PostgreSQL)
+- **CI/CD:** GitHub Actions, GitHub Container Registry (GHCR)
+- **Project management:** Jira (project `SCRUM`)
 
 ## Architecture
 
@@ -140,6 +146,12 @@ User types ──► validate input ──► wait 4 s (debounce) ──► runS
 ```
 PrograWeb/
 ├── pom.xml
+├── Dockerfile                (multi-stage build: Maven + JDK 17 -> JRE 17)
+├── docker-compose.yml        (app + PostgreSQL 16)
+├── .env.example              (database credentials for Docker Compose)
+├── .github/workflows/
+│   ├── ci.yml                (build + e2e tests + image build on every PR)
+│   └── docker-publish.yml    (publishes the image to GHCR from main)
 ├── package.json              (Playwright and test dependencies)
 ├── playwright.config.js      (Playwright configuration)
 ├── e2e/
@@ -216,17 +228,23 @@ $env:BASE_URL="http://localhost:8080"; npm test
 
 ## How to Run
 
-**Requirements:** JDK 25, Maven and PostgreSQL. Node.js 18+ only if you want to run the tests.
+**Requirements:** JDK 17, Maven and PostgreSQL. Node.js 18+ only if you want to run the tests.
 
 1. Create the database in PostgreSQL:
    ```sql
    CREATE DATABASE "PrograWeb";
    ```
-2. Set your username and password in `src/main/resources/application.properties`:
-   ```properties
-   spring.datasource.url=jdbc:postgresql://localhost:5432/PrograWeb
-   spring.datasource.username=postgres
-   spring.datasource.password=YOUR_PASSWORD
+2. The connection is read from environment variables, with local defaults in `src/main/resources/application.properties`:
+
+   | Variable | Default |
+   |---|---|
+   | `SPRING_DATASOURCE_URL` | `jdbc:postgresql://localhost:5432/PrograWeb` |
+   | `SPRING_DATASOURCE_USERNAME` | `postgres` |
+   | `SPRING_DATASOURCE_PASSWORD` | `1234` |
+
+   If your local password is different, set the variable instead of editing the file:
+   ```powershell
+   $env:SPRING_DATASOURCE_PASSWORD="YOUR_PASSWORD"
    ```
 3. Run the application:
    ```bash
@@ -238,6 +256,58 @@ $env:BASE_URL="http://localhost:8080"; npm test
    - Page 2: http://localhost:8080/pagina2.html
 
 Tables are created automatically thanks to `spring.jpa.hibernate.ddl-auto=update`.
+
+## Run with Docker
+
+**Requirements:** Docker Desktop (no JDK, Maven or PostgreSQL needed).
+
+```bash
+docker compose up --build      # builds the image and starts app + PostgreSQL
+docker compose down            # stops everything (add -v to also delete the data)
+```
+
+- App: http://localhost:8080
+- PostgreSQL (from the host): `localhost:5433`, database `PrograWeb`. Port 5433 avoids clashing with a local PostgreSQL.
+- Credentials: copy `.env.example` to `.env` and change `DB_USERNAME` / `DB_PASSWORD` if needed. `.env` is ignored by git.
+
+The published image can also be pulled directly:
+
+```bash
+docker pull ghcr.io/jeyby99/prograweb:latest
+```
+
+## CI/CD
+
+GitHub Actions workflows live in `.github/workflows/`:
+
+| Workflow | Trigger | What it does |
+|---|---|---|
+| `ci.yml` | Push or PR to `dev`, `test`, `main` | Maven build (Java 17), Playwright e2e tests (in the official Playwright container) and a Docker image build without pushing |
+| `docker-publish.yml` | Push to `main` (or manual run) | Builds and pushes `ghcr.io/jeyby99/prograweb` with tags `latest` and `sha-<commit>` |
+
+On CI, Playwright retries a failed test up to 2 times because some tests depend on timing (debounce and chained requests). Locally there are no retries.
+
+## Development Workflow
+
+Every change follows the same path, from Jira to `main`:
+
+```
+Jira ticket (SCRUM-X) ──► feature/SCRUM-X-short-name ──PR──► dev ──PR──► test ──PR──► main ──► GHCR image
+```
+
+1. **Jira first.** Create a ticket in the `SCRUM` project with a clear description and acceptance criteria. Work belongs to the epic `SCRUM-6`.
+2. **Branch.** Create `feature/SCRUM-X-short-name` from `dev`.
+3. **Commits.** Every commit message starts with the ticket key, for example `SCRUM-8: Add docker-compose with PostgreSQL`.
+4. **Pull requests.** Open a PR to `dev` with the Jira link, what changed, why, and how it was tested. CI must pass, and the PR gets a review comment before it is merged.
+5. **Promotion.** `dev` → `test` (testing) → `main` (release) through PRs. Merging into `main` publishes the Docker image.
+6. **Language.** All documentation, code comments, commits, PRs and Jira tickets are written in English.
+
+| Branch | Purpose |
+|---|---|
+| `main` | Stable version; every update publishes the Docker image |
+| `test` | Integration and testing before release |
+| `dev` | Development; feature branches are merged here |
+| `feature/SCRUM-X-*` | One branch per Jira ticket |
 
 ## Author
 
