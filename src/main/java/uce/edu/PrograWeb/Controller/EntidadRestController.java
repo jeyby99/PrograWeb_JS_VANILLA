@@ -8,13 +8,13 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/api/entidades")
-@CrossOrigin(origins = "*") // Permite al frontend conectarse sin bloqueos
+@CrossOrigin(origins = "*") // Lets the frontend call the API from any origin
 public class EntidadRestController {
 
     @Autowired
     private EntidadRepository repositorio;
 
-    // Endpoint para obtener todos o buscar por nombre (Búsqueda en tiempo real)
+    // Returns all entities, or searches by name (real-time search)
     @GetMapping
     public List<Entidad> obtenerEntidades(@RequestParam(required = false) String query) {
         if (query != null && !query.trim().isEmpty()) {
