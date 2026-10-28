@@ -25,14 +25,12 @@ jobs:
   e2e:
     name: E2E tests (Playwright, page 2)
     runs-on: ubuntu-latest
+    # Official image matching the pinned @playwright/test version: browsers and
+    # OS deps are preinstalled (newer runner images may not be supported yet).
+    container: mcr.microsoft.com/playwright:v1.56.0-noble
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: npm
       - run: npm ci
-      - run: npx playwright install --with-deps chromium
       - run: npm test
       - name: Upload Playwright report
         if: failure()
