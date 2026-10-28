@@ -19,7 +19,7 @@ public class Entidad {
     @Column(name = "email", nullable = false, unique = true)
     private String email;
 
-    // Constructores
+    // Constructors
     public Entidad() {}
 
     public Entidad(String nombre, String apellido, String email) {
@@ -28,7 +28,7 @@ public class Entidad {
         this.email = email;
     }
 
-    // Getters y Setters
+    // Getters and setters
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getNombre() { return nombre; }

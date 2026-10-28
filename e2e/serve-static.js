@@ -1,5 +1,5 @@
-// Servidor estático mínimo (sin dependencias) para probar las páginas de
-// src/main/resources/static sin arrancar Spring Boot.
+// Minimal static server (no dependencies) to test the pages in
+// src/main/resources/static without starting Spring Boot.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -41,4 +41,4 @@ http
       res.end(data);
     });
   })
-  .listen(PORT, () => console.log(`Sirviendo ${ROOT} en http://localhost:${PORT}`));
+  .listen(PORT, () => console.log(`Serving ${ROOT} on http://localhost:${PORT}`));
