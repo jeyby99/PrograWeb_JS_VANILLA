@@ -7,3 +7,4 @@ playwright-report/
 e2e/
 .github/
 .env
+gateway/
