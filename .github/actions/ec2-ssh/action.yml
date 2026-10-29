@@ -1,0 +1,54 @@
+# Prepares SSH access to the EC2 test server as the host alias "ec2".
+# Fails with a clear message when the AWS Academy Learner Lab is off.
+name: EC2 SSH access
+description: Configure ~/.ssh so that "ssh ec2" reaches the AWS test server
+
+inputs:
+  host:
+    description: Public IP or DNS name of the server (Elastic IP)
+    required: true
+  user:
+    description: SSH user
+    required: false
+    default: ec2-user
+  ssh-key:
+    description: Private key (.pem contents)
+    required: true
+  host-key:
+    description: Optional "<type> <key>" to pin the server host key; empty = trust on first use
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Configure SSH
+      shell: bash
+      env:
+        EC2_HOST: ${{ inputs.host }}
+        EC2_USER: ${{ inputs.user }}
+        SSH_KEY: ${{ inputs.ssh-key }}
+        HOST_KEY: ${{ inputs.host-key }}
+      run: |
+        if ! timeout 15 bash -c "</dev/tcp/$EC2_HOST/22" 2>/dev/null; then
+          echo "::error title=Test server unreachable::$EC2_HOST:22 does not answer. Start the AWS Academy Learner Lab, wait until the instance is running, then re-run this job."
+          exit 1
+        fi
+        install -m 700 -d ~/.ssh
+        printf '%s\n' "$SSH_KEY" > ~/.ssh/ec2.pem
+        chmod 600 ~/.ssh/ec2.pem
+        if [ -n "$HOST_KEY" ]; then
+          echo "$EC2_HOST $HOST_KEY" >> ~/.ssh/known_hosts
+        else
+          # Trust on first use: fine for a short-lived test server
+          ssh-keyscan -T 10 "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+        fi
+        cat >> ~/.ssh/config <<EOF
+        Host ec2
+          HostName $EC2_HOST
+          User $EC2_USER
+          IdentityFile ~/.ssh/ec2.pem
+          StrictHostKeyChecking yes
+          ConnectTimeout 15
+          ServerAliveInterval 15
+        EOF

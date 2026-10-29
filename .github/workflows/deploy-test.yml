@@ -5,6 +5,10 @@
 # - Manual run ("Run workflow") deploys any tag, e.g. to redeploy after the
 #   AWS Academy lab was off. Re-running a failed job does the same.
 #
+#   deploy   -> copy files, deploy, health check; rolls back if unhealthy
+#   smoke    -> Playwright suite against the deployed server
+#   rollback -> only if the smoke tests fail: restore the previous image
+#
 # Uses SSH with the EC2 key pair instead of AWS credentials: Learner Lab keys
 # expire every ~4 hours. Configuration lives in the GitHub "test" environment:
 #   variables: EC2_HOST (Elastic IP), EC2_USER (default ec2-user),
@@ -30,6 +34,10 @@ on:
 permissions:
   contents: read
 
+env:
+  APP_DIR: /opt/prograweb
+  IMAGE_TAG: ${{ inputs.image-tag }}
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -40,11 +48,10 @@ jobs:
     environment:
       name: test
       url: http://${{ vars.EC2_HOST }}:8080
+    outputs:
+      app-url: http://${{ vars.EC2_HOST }}:8080
     env:
       EC2_HOST: ${{ vars.EC2_HOST }}
-      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
-      APP_DIR: /opt/prograweb
-      IMAGE_TAG: ${{ inputs.image-tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -67,32 +74,12 @@ jobs:
           fi
 
       - name: Set up SSH
-        env:
-          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          HOST_KEY: ${{ vars.EC2_HOST_KEY }}
-        run: |
-          if ! timeout 15 bash -c "</dev/tcp/$EC2_HOST/22" 2>/dev/null; then
-            echo "::error title=Test server unreachable::$EC2_HOST:22 does not answer. Start the AWS Academy Learner Lab, wait until the instance is running, then re-run this job."
-            exit 1
-          fi
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/ec2.pem
-          chmod 600 ~/.ssh/ec2.pem
-          if [ -n "$HOST_KEY" ]; then
-            echo "$EC2_HOST $HOST_KEY" >> ~/.ssh/known_hosts
-          else
-            # Trust on first use: fine for a short-lived test server
-            ssh-keyscan -T 10 "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          fi
-          cat >> ~/.ssh/config <<EOF
-          Host ec2
-            HostName $EC2_HOST
-            User $EC2_USER
-            IdentityFile ~/.ssh/ec2.pem
-            StrictHostKeyChecking yes
-            ConnectTimeout 15
-            ServerAliveInterval 15
-          EOF
+        uses: ./.github/actions/ec2-ssh
+        with:
+          host: ${{ vars.EC2_HOST }}
+          user: ${{ vars.EC2_USER || 'ec2-user' }}
+          ssh-key: ${{ secrets.EC2_SSH_KEY }}
+          host-key: ${{ vars.EC2_HOST_KEY }}
 
       # SC2029: $APP_DIR and $IMAGE_TAG are meant to expand on the runner (both validated above)
       - name: Copy deployment files
@@ -104,6 +91,7 @@ jobs:
           ssh ec2 "chmod +x $APP_DIR/deploy.sh"
 
       - name: Deploy
+        id: deploy
         env:
           DB_USERNAME: ${{ vars.DB_USERNAME || 'postgres' }}
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
@@ -111,6 +99,17 @@ jobs:
           # shellcheck disable=SC2029
           printf 'DB_USERNAME=%s\nDB_PASSWORD=%s\n' "$DB_USERNAME" "$DB_PASSWORD" \
             | ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh deploy $IMAGE_TAG"
+
+      - name: Health check
+        run: deploy/health-check.sh "http://$EC2_HOST:8080" 120
+
+      - name: Roll back (deployment unhealthy)
+        if: failure() && steps.deploy.outcome == 'success'
+        run: |
+          echo "::error title=Deployment unhealthy::Rolling back to the previous image"
+          # shellcheck disable=SC2029
+          ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh rollback"
+          deploy/health-check.sh "http://$EC2_HOST:8080" 120
 
       - name: Summary
         if: always()
@@ -124,3 +123,52 @@ jobs:
             echo "| Server | http://$EC2_HOST:8080 |"
             echo "| Result | ${{ job.status }} |"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke:
+    needs: deploy
+    runs-on: ubuntu-latest
+    # Same image as the CI e2e job: browsers preinstalled for the pinned Playwright
+    container: mcr.microsoft.com/playwright:v1.56.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - name: Playwright against the test server
+        env:
+          BASE_URL: ${{ needs.deploy.outputs.app-url }}
+        run: npx playwright test --grep-invert @live
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-playwright-report
+          path: playwright-report/
+          retention-days: 7
+
+  rollback:
+    needs: [deploy, smoke]
+    # Only when the deployment itself was healthy but the smoke tests failed
+    if: failure() && needs.deploy.result == 'success' && needs.smoke.result == 'failure'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: deploy-test
+      cancel-in-progress: false
+    environment:
+      name: test
+      url: http://${{ vars.EC2_HOST }}:8080
+    env:
+      EC2_HOST: ${{ vars.EC2_HOST }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up SSH
+        uses: ./.github/actions/ec2-ssh
+        with:
+          host: ${{ vars.EC2_HOST }}
+          user: ${{ vars.EC2_USER || 'ec2-user' }}
+          ssh-key: ${{ secrets.EC2_SSH_KEY }}
+          host-key: ${{ vars.EC2_HOST_KEY }}
+      - name: Roll back (smoke tests failed)
+        run: |
+          echo "::error title=Smoke tests failed::Rolling back to the previous image"
+          # shellcheck disable=SC2029
+          ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh rollback"
+          deploy/health-check.sh "http://$EC2_HOST:8080" 120
