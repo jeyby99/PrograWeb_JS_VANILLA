@@ -1,0 +1,40 @@
+# Test environment on the AWS EC2 server (epic SCRUM-14).
+# Unlike the root docker-compose.yml, this file does not build anything:
+# it pulls the image published by GitHub Actions to GHCR.
+#
+# Usage on the server (in /opt/prograweb, next to a .env file):
+#   docker compose -f docker-compose.test.yml pull
+#   docker compose -f docker-compose.test.yml up -d
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: PrograWeb
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    # No "ports": the database is only reachable from the app container
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d PrograWeb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    image: ghcr.io/jeyby99/prograweb:${IMAGE_TAG:-test}
+    # Comes back on its own when the Learner Lab starts the instance again
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
+      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
