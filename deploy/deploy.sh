@@ -3,6 +3,7 @@
 # and calls it over SSH:
 #
 #   deploy.sh deploy <image-tag>   DB_USERNAME=/DB_PASSWORD= lines are read from stdin
+#   deploy.sh rollback             goes back to the tag that ran before the last deploy
 #   deploy.sh status               shows the running tag and the previous one
 #
 # The database credentials arrive on stdin so they never appear in a command line.
@@ -49,11 +50,12 @@ cmd_deploy() {
     [[ "$user" =~ $SAFE_VALUE && "$pass" =~ $SAFE_VALUE ]] || {
         echo "DB_USERNAME/DB_PASSWORD may only use letters, digits and . _ @ % + = : -" >&2; exit 1; }
 
-    # Remember what was running, so it can be restored (rollback)
+    # Remember the whole configuration that was running (tag + credentials),
+    # so a rollback restores exactly that. A redeploy of the same tag keeps it.
     local current
     current="$(env_value IMAGE_TAG)"
     if [ -n "$current" ] && [ "$current" != "$tag" ]; then
-        echo "$current" > .previous-tag
+        cp -p .env .env.previous
     fi
 
     write_env "$tag" "$user" "$pass"
@@ -64,14 +66,33 @@ cmd_deploy() {
     compose ps
 }
 
+cmd_rollback() {
+    if [ ! -f .env.previous ]; then
+        echo "Nothing to roll back to (first deployment?)" >&2
+        exit 1
+    fi
+    local current previous
+    current="$(env_value IMAGE_TAG)"
+    previous="$(sed -n 's/^IMAGE_TAG=//p' .env.previous)"
+    # Keep the broken configuration for the record, restore the previous one
+    cp -p .env .env.failed
+    cp -p .env.previous .env
+    echo "Rolling back $IMAGE:$current -> $IMAGE:$previous"
+    compose pull --quiet app
+    compose up -d --remove-orphans
+    compose ps
+}
+
 cmd_status() {
     echo "IMAGE_TAG=$(env_value IMAGE_TAG)"
-    echo "PREVIOUS_TAG=$(cat .previous-tag 2>/dev/null || echo none)"
+    echo "PREVIOUS_TAG=$(sed -n 's/^IMAGE_TAG=//p' .env.previous 2>/dev/null || true)"
+    echo "FAILED_TAG=$(sed -n 's/^IMAGE_TAG=//p' .env.failed 2>/dev/null || true)"
     compose ps
 }
 
 case "${1:-}" in
     deploy) shift; cmd_deploy "$@" ;;
+    rollback) cmd_rollback ;;
     status) cmd_status ;;
-    *) echo "usage: deploy.sh {deploy <image-tag>|status}" >&2; exit 2 ;;
+    *) echo "usage: deploy.sh {deploy <image-tag>|rollback|status}" >&2; exit 2 ;;
 esac
