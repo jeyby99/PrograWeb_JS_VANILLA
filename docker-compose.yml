@@ -1,6 +1,25 @@
 # Starts PrograWeb + PostgreSQL behind the API Gateway:  docker compose up --build
-# Only the gateway is published (http://localhost:8080); the app is reachable
-# only inside this Docker network. Credentials: .env file (see .env.example).
+# Only the gateway is published (http://localhost:8080). It load balances (round robin)
+# over two backend instances, app1 and app2, reachable only inside this Docker network.
+# Credentials: .env file (see .env.example).
+
+# Shared definition of a backend instance (YAML anchor)
+x-backend: &backend
+  build: .
+  image: ghcr.io/jeyby99/prograweb:latest
+  environment: &backend-env
+    SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
+    SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+    SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-1234}
+  # Healthy = the REST API answers (the app is up and reaches PostgreSQL)
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/api/entidades || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 12
+    start_period: 20s
+  # No "ports": every request goes through the gateway
+
 services:
   db:
     image: postgres:16-alpine
@@ -18,25 +37,36 @@ services:
       timeout: 5s
       retries: 10
 
-  app:
-    build: .
-    image: ghcr.io/jeyby99/prograweb:latest
+  app1:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      INSTANCE_NAME: app1
     depends_on:
       db:
         condition: service_healthy
+
+  app2:
+    <<: *backend
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
-      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
-      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-1234}
-    # No "ports": every request goes through the gateway
+      <<: *backend-env
+      INSTANCE_NAME: app2
+    # Starts after app1 is healthy, so only one instance creates the tables (ddl-auto=update)
+    depends_on:
+      app1:
+        condition: service_healthy
 
   gateway:
     build: ./gateway
     image: ghcr.io/jeyby99/prograweb-gateway:latest
     depends_on:
-      - app
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
     environment:
-      BACKEND_URL: http://app:8080
+      BACKEND_1_URL: http://app1:8080
+      BACKEND_2_URL: http://app2:8080
     ports:
       - "8080:8080"
 

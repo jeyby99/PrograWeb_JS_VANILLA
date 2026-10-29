@@ -1,5 +1,6 @@
-# API Gateway routes. BACKEND_URL points to the PrograWeb backend
-# (http://app:8080 inside docker compose, http://localhost:8081 when run by hand).
+# API Gateway routes + load balancer.
+# The backend runs as two instances (BACKEND_1_URL, BACKEND_2_URL): http://app1:8080 and
+# http://app2:8080 inside docker compose, http://localhost:8081 / :8082 when run by hand.
 server:
   port: 8080
 
@@ -7,6 +8,22 @@ spring:
   application:
     name: prograweb-gateway
   cloud:
+    # Static list of backend instances (no service registry needed)
+    discovery:
+      client:
+        simple:
+          instances:
+            prograweb-backend:
+              - uri: ${BACKEND_1_URL:http://localhost:8081}
+              - uri: ${BACKEND_2_URL:http://localhost:8082}
+    loadbalancer:
+      # Round robin (default) over the instances that pass the health check
+      configurations: health-check
+      health-check:
+        interval: 5s
+        path:
+          # The backend has no actuator: its REST API answers 200 when it and PostgreSQL are up
+          prograweb-backend: /api/entidades
     gateway:
       server:
         webflux:
@@ -22,14 +39,20 @@ spring:
                 allowedMethods: [GET, POST, PUT, DELETE, OPTIONS]
                 allowedHeaders: "*"
           routes:
-            # REST API of the backend (Page 1 and any external client)
+            # REST API of the backend (Page 1 and any external client), load balanced
             - id: backend-api
-              uri: ${BACKEND_URL:http://localhost:8081}
+              uri: lb://prograweb-backend
               predicates:
                 - Path=/api/**
               filters:
-                # The backend sees the public host, not "app:8080" (matters for absolute URLs)
+                # The backend sees the public host, not "app1:8080" (matters for absolute URLs)
                 - PreserveHostHeader
+                # If the chosen instance fails, a GET is retried once on the next instance
+                - name: Retry
+                  args:
+                    retries: 1
+                    methods: GET
+                    series: SERVER_ERROR
             # External Rick and Morty API through the gateway:
             # /rickandmorty/character/?name=rick -> https://rickandmortyapi.com/api/character/?name=rick
             - id: rick-and-morty
@@ -38,15 +61,20 @@ spring:
                 - Path=/rickandmorty/**
               filters:
                 - RewritePath=/rickandmorty/?(?<segment>.*), /api/$\{segment}
-            # Everything else (CRUD views, static pages): the backend. Last route (highest order).
+            # Everything else (CRUD views, static pages): the backend, load balanced. Last route.
             - id: backend-web
-              uri: ${BACKEND_URL:http://localhost:8081}
+              uri: lb://prograweb-backend
               order: 1000
               predicates:
                 - Path=/**
               filters:
-                # Without it, the CRUD form redirects (302) to http://app:8080/..., unreachable from a browser
+                # Without it, the CRUD form redirects (302) to http://app1:8080/..., unreachable from a browser
                 - PreserveHostHeader
+                - name: Retry
+                  args:
+                    retries: 1
+                    methods: GET
+                    series: SERVER_ERROR
 
 management:
   endpoints:
