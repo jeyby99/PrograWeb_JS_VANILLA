@@ -1,0 +1,126 @@
+# Deploys an image of PrograWeb to the AWS EC2 test server (epic SCRUM-14).
+#
+# - Called by docker-publish.yml right after the image for the test branch is
+#   published (it is a reusable workflow, so it also works before reaching main).
+# - Manual run ("Run workflow") deploys any tag, e.g. to redeploy after the
+#   AWS Academy lab was off. Re-running a failed job does the same.
+#
+# Uses SSH with the EC2 key pair instead of AWS credentials: Learner Lab keys
+# expire every ~4 hours. Configuration lives in the GitHub "test" environment:
+#   variables: EC2_HOST (Elastic IP), EC2_USER (default ec2-user),
+#              DB_USERNAME (default postgres), EC2_HOST_KEY (optional, pins the SSH host key)
+#   secrets:   EC2_SSH_KEY (contents of the .pem file), DB_PASSWORD
+name: Deploy to test (AWS EC2)
+
+on:
+  workflow_call:
+    inputs:
+      image-tag:
+        description: Image tag to deploy (e.g. test-sha-1a2b3c4)
+        type: string
+        required: true
+  workflow_dispatch:
+    inputs:
+      image-tag:
+        description: Image tag to deploy (e.g. test-sha-1a2b3c4)
+        type: string
+        required: true
+        default: test
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # One deployment at a time; a newer one waits instead of cancelling the running one
+    concurrency:
+      group: deploy-test
+      cancel-in-progress: false
+    environment:
+      name: test
+      url: http://${{ vars.EC2_HOST }}:8080
+    env:
+      EC2_HOST: ${{ vars.EC2_HOST }}
+      EC2_USER: ${{ vars.EC2_USER || 'ec2-user' }}
+      APP_DIR: /opt/prograweb
+      IMAGE_TAG: ${{ inputs.image-tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check configuration
+        env:
+          HAS_SSH_KEY: ${{ secrets.EC2_SSH_KEY != '' }}
+          HAS_DB_PASSWORD: ${{ secrets.DB_PASSWORD != '' }}
+        run: |
+          missing=()
+          [ -n "$EC2_HOST" ] || missing+=("variable EC2_HOST")
+          [ "$HAS_SSH_KEY" = true ] || missing+=("secret EC2_SSH_KEY")
+          [ "$HAS_DB_PASSWORD" = true ] || missing+=("secret DB_PASSWORD")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error title=Test environment not configured::Missing in the GitHub 'test' environment: ${missing[*]}"
+            exit 1
+          fi
+          if [[ ! "$IMAGE_TAG" =~ ^[A-Za-z0-9._-]+$ ]]; then
+            echo "::error title=Invalid image tag::$IMAGE_TAG"
+            exit 1
+          fi
+
+      - name: Set up SSH
+        env:
+          SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          HOST_KEY: ${{ vars.EC2_HOST_KEY }}
+        run: |
+          if ! timeout 15 bash -c "</dev/tcp/$EC2_HOST/22" 2>/dev/null; then
+            echo "::error title=Test server unreachable::$EC2_HOST:22 does not answer. Start the AWS Academy Learner Lab, wait until the instance is running, then re-run this job."
+            exit 1
+          fi
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/ec2.pem
+          chmod 600 ~/.ssh/ec2.pem
+          if [ -n "$HOST_KEY" ]; then
+            echo "$EC2_HOST $HOST_KEY" >> ~/.ssh/known_hosts
+          else
+            # Trust on first use: fine for a short-lived test server
+            ssh-keyscan -T 10 "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          cat >> ~/.ssh/config <<EOF
+          Host ec2
+            HostName $EC2_HOST
+            User $EC2_USER
+            IdentityFile ~/.ssh/ec2.pem
+            StrictHostKeyChecking yes
+            ConnectTimeout 15
+            ServerAliveInterval 15
+          EOF
+
+      # SC2029: $APP_DIR and $IMAGE_TAG are meant to expand on the runner (both validated above)
+      - name: Copy deployment files
+        run: |
+          # shellcheck disable=SC2029
+          ssh ec2 "mkdir -p $APP_DIR"
+          scp deploy/docker-compose.test.yml deploy/deploy.sh "ec2:$APP_DIR/"
+          # shellcheck disable=SC2029
+          ssh ec2 "chmod +x $APP_DIR/deploy.sh"
+
+      - name: Deploy
+        env:
+          DB_USERNAME: ${{ vars.DB_USERNAME || 'postgres' }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+        run: |
+          # shellcheck disable=SC2029
+          printf 'DB_USERNAME=%s\nDB_PASSWORD=%s\n' "$DB_USERNAME" "$DB_PASSWORD" \
+            | ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh deploy $IMAGE_TAG"
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### Test deployment"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`ghcr.io/jeyby99/prograweb:$IMAGE_TAG\` |"
+            echo "| Server | http://$EC2_HOST:8080 |"
+            echo "| Result | ${{ job.status }} |"
+          } >> "$GITHUB_STEP_SUMMARY"
