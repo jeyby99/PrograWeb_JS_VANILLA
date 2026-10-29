@@ -9,6 +9,8 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 3. [Languages](#languages)
 4. [Technologies](#technologies)
 5. [Architecture](#architecture)
+   - [API Gateway](#api-gateway)
+   - [Load Balancer](#load-balancer)
 6. [Design Pattern](#design-pattern)
 7. [Programming Paradigm](#programming-paradigm)
 8. [Project Structure](#project-structure)
@@ -67,13 +69,15 @@ Build a full-stack web application that connects a Spring Boot REST backend to a
 - **Responsive design:** Bootstrap 5, Tailwind CSS, CSS Grid, Flexbox, Media Queries
 - **External API:** [Rick and Morty API](https://rickandmortyapi.com) (3 endpoints: `character`, `location`, `episode`)
 - **Testing:** Playwright (`@playwright/test`) on Node.js
-- **Containers:** Docker (multi-stage image), Docker Compose (app + PostgreSQL)
+- **API Gateway:** Spring Cloud Gateway 2025.0 (Spring WebFlux, Netty), Spring Boot Actuator
+- **Load balancing:** Spring Cloud LoadBalancer (round robin + health check) over two backend instances
+- **Containers:** Docker (multi-stage images), Docker Compose (gateway + 2 backend instances + PostgreSQL)
 - **CI/CD:** GitHub Actions, GitHub Container Registry (GHCR)
 - **Project management:** Jira (project `SCRUM`)
 
 ## Architecture
 
-The project follows a **client-server architecture** with a **layered architecture** on the backend:
+The project follows a **client-server architecture** with a **layered architecture** on the backend. Since SCRUM-23 every request enters through an **API Gateway** (see [API Gateway](#api-gateway)); the diagram below shows the backend layers behind it:
 
 ```
 ┌──────────────────────┐        HTTP / JSON        ┌───────────────────────────────┐
@@ -98,6 +102,60 @@ The project follows a **client-server architecture** with a **layered architectu
 - **Repository layer:** database access through Spring Data JPA.
 - **Model layer:** JPA entity mapped to a PostgreSQL table.
 - **Page 1** talks to our own REST API. **Page 2** talks directly to the Rick and Morty API from the browser.
+
+### API Gateway
+
+**What:** a separate Spring Boot service (`gateway/`, Spring Cloud Gateway) that is the **single entry point** of the application. It is the only container published on port 8080; the backend is reachable only inside the Docker network.
+
+```
+                                                          ┌──► Backend app1 ──┐
+Browser ──:8080──► API Gateway ──(/api/**, /, pages)── LB ─┤                   ├──► PostgreSQL
+                        │                                  └──► Backend app2 ──┘
+                        │                               (Docker network only)
+                        └──(/rickandmorty/**)──► https://rickandmortyapi.com/api/**
+
+Every request gets an X-Request-Id and one log line (method, path, status, time).
+```
+
+**Routes** (`gateway/src/main/resources/application.yml`):
+
+| Route id | Path | Destination | Filters |
+|---|---|---|---|
+| `backend-api` | `/api/**` | `lb://prograweb-backend` (app1, app2) | `PreserveHostHeader`, `Retry` (GET) |
+| `rick-and-morty` | `/rickandmorty/**` | `https://rickandmortyapi.com/api/**` | `RewritePath` |
+| `backend-web` | everything else (order 1000, last) | `lb://prograweb-backend` (app1, app2) | `PreserveHostHeader`, `Retry` (GET) |
+
+**Cross-cutting concerns handled in one place:**
+- `RequestLoggingFilter` (global filter): assigns an `X-Request-Id` (keeps a valid one sent by the client), forwards it to the backend, returns it in the response and logs `GET /api/entidades -> 200 OK in 20 ms [id]`.
+- Default filters: `X-Gateway: prograweb-gateway` on every response; `DedupeResponseHeader` keeps a single CORS header when both gateway and backend send one.
+- CORS for `/api/**`, health check at `/actuator/health`.
+- `PreserveHostHeader` on backend routes: without it the CRUD form redirects to `http://app:8080/...`, an internal Docker name the browser cannot open.
+
+**Why a gateway:** one public entry point (the backend and database are no longer exposed), one place for logging, tracing and CORS, and the freedom to move or split backend services without changing the clients.
+
+### Load Balancer
+
+**What:** the gateway spreads the backend traffic over **two instances** (`app1`, `app2`: same image, same PostgreSQL) with **Spring Cloud LoadBalancer**. Routes use `lb://prograweb-backend` instead of a fixed URL.
+
+| Piece | Configuration | Effect |
+|---|---|---|
+| Instance list | `spring.cloud.discovery.client.simple.instances.prograweb-backend` = `BACKEND_1_URL`, `BACKEND_2_URL` | Static list, no service registry needed |
+| Algorithm | Round robin (default) | Consecutive requests alternate app1 → app2 → app1 |
+| Health check | `spring.cloud.loadbalancer.configurations: health-check`, every 5 s on `/api/entidades` | A failing instance leaves the rotation and comes back when it recovers |
+| Retry | `Retry` filter, 1 retry, GET only, on 5xx or connection errors | A request that hits a dead instance is retried on the other one, so the user sees no error |
+| `X-Served-By` | `ServedByFilter` in the backend (`INSTANCE_NAME`) | Shows which instance answered |
+
+`app2` starts after `app1` is healthy, so only one instance creates the tables (`ddl-auto=update`). Both share the database, so data written through one instance is read through the other.
+
+**Why:** with one backend, a crash takes the whole app down. With two behind the balancer the app keeps answering, and more instances can be added for more load. Only `POST` is not retried: repeating it could create a record twice.
+
+**Try it:**
+
+```bash
+for i in 1 2 3 4; do curl -s -D - -o /dev/null http://localhost:8080/api/entidades | grep X-Served-By; done
+docker compose stop app2      # requests keep answering 200 from app1
+docker compose start app2     # app2 joins the rotation again
+```
 
 ### Page 2: chained requests
 
@@ -147,7 +205,14 @@ User types ──► validate input ──► wait 4 s (debounce) ──► runS
 PrograWeb/
 ├── pom.xml
 ├── Dockerfile                (multi-stage build: Maven + JDK 17 -> JRE 17)
-├── docker-compose.yml        (app + PostgreSQL 16)
+├── docker-compose.yml        (gateway + app + PostgreSQL 16)
+├── gateway/                  (API Gateway, separate Maven project)
+│   ├── pom.xml               (Spring Cloud Gateway 2025.0, Actuator)
+│   ├── Dockerfile
+│   └── src/main/java/uce/edu/gateway/
+│       ├── GatewayApplication.java
+│       └── RequestLoggingFilter.java   (X-Request-Id + request log)
+│   (load balancer: gateway/src/main/resources/application.yml)
 ├── .env.example              (database credentials for Docker Compose)
 ├── .github/workflows/
 │   ├── ci.yml                (build + e2e tests + image build on every PR)
@@ -159,6 +224,7 @@ PrograWeb/
 │   └── serve-static.js       (tiny static server used by the tests)
 └── src/main
     ├── java/uce/edu/PrograWeb
+    │   ├── Config/       (ServedByFilter: X-Served-By header)
     │   ├── Controller/   (EntidadController, EntidadRestController)
     │   ├── Model/        (Entidad)
     │   ├── Repository/   (EntidadRepository)
@@ -275,11 +341,13 @@ Tables are created automatically thanks to `spring.jpa.hibernate.ddl-auto=update
 **Requirements:** Docker Desktop (no JDK, Maven or PostgreSQL needed).
 
 ```bash
-docker compose up --build      # builds the image and starts app + PostgreSQL
+docker compose up --build      # builds the images and starts gateway + app1 + app2 + PostgreSQL
 docker compose down            # stops everything (add -v to also delete the data)
 ```
 
-- App: http://localhost:8080
+- App (through the API Gateway): http://localhost:8080. The backend instances (app1, app2) are not published.
+- Rick and Morty API through the gateway: http://localhost:8080/rickandmorty/character/?name=rick
+- Gateway health: http://localhost:8080/actuator/health
 - PostgreSQL (from the host): `localhost:5433`, database `PrograWeb`. Port 5433 avoids clashing with a local PostgreSQL.
 - Credentials: copy `.env.example` to `.env` and change `DB_USERNAME` / `DB_PASSWORD` if needed. `.env` is ignored by git.
 
@@ -287,6 +355,15 @@ The published image can also be pulled directly:
 
 ```bash
 docker pull ghcr.io/jeyby99/prograweb:latest
+docker pull ghcr.io/jeyby99/prograweb-gateway:latest
+```
+
+**Without Docker:** run two backend instances on ports 8081 and 8082 and the gateway on 8080:
+
+```bash
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8081 --INSTANCE_NAME=app1"
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8082 --INSTANCE_NAME=app2"
+mvn -f gateway/pom.xml spring-boot:run
 ```
 
 ## CI/CD

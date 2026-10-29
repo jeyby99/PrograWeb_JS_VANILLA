@@ -21,6 +21,8 @@ jobs:
           cache: maven
       - name: Build
         run: mvn -B clean package -DskipTests
+      - name: Build and test the API Gateway
+        run: mvn -B -f gateway/pom.xml clean verify
 
   e2e:
     name: E2E tests (Playwright, page 2)
@@ -53,3 +55,10 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Build gateway image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: ./gateway
+          push: false
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
