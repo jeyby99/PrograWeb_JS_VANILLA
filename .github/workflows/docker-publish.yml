@@ -1,5 +1,6 @@
-# Publishes the application image to GitHub Container Registry
-# (ghcr.io/jeyby99/prograweb) every time main is updated.
+# Publishes the images to GitHub Container Registry every time main is updated:
+#   ghcr.io/jeyby99/prograweb          (backend)
+#   ghcr.io/jeyby99/prograweb-gateway  (API Gateway)
 name: Publish Docker image
 
 on:
@@ -13,6 +14,7 @@ permissions:
 
 env:
   IMAGE_NAME: ghcr.io/jeyby99/prograweb
+  GATEWAY_IMAGE_NAME: ghcr.io/jeyby99/prograweb-gateway
 
 jobs:
   publish:
@@ -43,3 +45,20 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Gateway image tags and labels
+        id: gateway-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GATEWAY_IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+      - name: Build and push the gateway
+        uses: docker/build-push-action@v6
+        with:
+          context: ./gateway
+          push: true
+          tags: ${{ steps.gateway-meta.outputs.tags }}
+          labels: ${{ steps.gateway-meta.outputs.labels }}
+          cache-from: type=gha,scope=gateway
+          cache-to: type=gha,mode=max,scope=gateway
