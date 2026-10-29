@@ -1,0 +1,2 @@
+# Shell scripts run on Linux (CI runners and the EC2 server): always LF
+*.sh text eol=lf
