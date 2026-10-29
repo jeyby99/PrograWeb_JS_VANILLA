@@ -1,0 +1,55 @@
+# API Gateway routes. BACKEND_URL points to the PrograWeb backend
+# (http://app:8080 inside docker compose, http://localhost:8081 when run by hand).
+server:
+  port: 8080
+
+spring:
+  application:
+    name: prograweb-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          default-filters:
+            # Marks every response that went through the gateway
+            - AddResponseHeader=X-Gateway, prograweb-gateway
+            # The backend also sends CORS headers; keep a single copy (browsers reject duplicates)
+            - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST
+          globalcors:
+            cors-configurations:
+              '[/api/**]':
+                allowedOrigins: "*"
+                allowedMethods: [GET, POST, PUT, DELETE, OPTIONS]
+                allowedHeaders: "*"
+          routes:
+            # REST API of the backend (Page 1 and any external client)
+            - id: backend-api
+              uri: ${BACKEND_URL:http://localhost:8081}
+              predicates:
+                - Path=/api/**
+              filters:
+                # The backend sees the public host, not "app:8080" (matters for absolute URLs)
+                - PreserveHostHeader
+            # External Rick and Morty API through the gateway:
+            # /rickandmorty/character/?name=rick -> https://rickandmortyapi.com/api/character/?name=rick
+            - id: rick-and-morty
+              uri: https://rickandmortyapi.com
+              predicates:
+                - Path=/rickandmorty/**
+              filters:
+                - RewritePath=/rickandmorty/?(?<segment>.*), /api/$\{segment}
+            # Everything else (CRUD views, static pages): the backend. Last route (highest order).
+            - id: backend-web
+              uri: ${BACKEND_URL:http://localhost:8081}
+              order: 1000
+              predicates:
+                - Path=/**
+              filters:
+                # Without it, the CRUD form redirects (302) to http://app:8080/..., unreachable from a browser
+                - PreserveHostHeader
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health
