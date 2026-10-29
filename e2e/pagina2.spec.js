@@ -123,7 +123,8 @@ async function setup(page, opts = {}) {
 
       if (url.pathname === '/api/character/' || url.pathname === '/api/character') {
         const query = url.searchParams.get('name');
-        calls.push({ kind: 'character', query, url: req.url(), type: req.resourceType(), order: ++order });
+        const apiPage = Number(url.searchParams.get('page') || 1);
+        calls.push({ kind: 'character', query, page: apiPage, url: req.url(), type: req.resourceType(), order: ++order });
         if (opts.characterDelay) await sleep(opts.characterDelay(query));
         if (opts.abortCharacter) return await route.abort('failed');
         if (opts.characterStatus) return await json(opts.characterStatus, { error: 'mock error' });
@@ -131,8 +132,11 @@ async function setup(page, opts = {}) {
         const list = opts.characters
           ? opts.characters
           : CHARACTERS.filter((c) => c.name.toLowerCase().includes((query || '').toLowerCase()));
-        if (!list.length) return await json(404, { error: 'There is nothing here' });
-        return await json(200, { info: { count: list.length, pages: 1, next: null, prev: null }, results: list });
+        // Same pagination as the real API: 20 per page, 404 past the last page
+        const pages = Math.ceil(list.length / 20);
+        if (!list.length || apiPage > pages) return await json(404, { error: 'There is nothing here' });
+        const results = list.slice((apiPage - 1) * 20, apiPage * 20);
+        return await json(200, { info: { count: list.length, pages, next: null, prev: null }, results });
       }
 
       // Episode filter by code, partial match like the real API: S04, E04, S04E02
@@ -498,6 +502,95 @@ test.describe('Page 2 - Rick and Morty', () => {
     await expect(status(page)).toHaveAttribute('data-state', 'invalid');
     await page.waitForTimeout(300);
     expect(s.calls).toHaveLength(0);
+  });
+
+  /* ---------------------------- Pagination ---------------------------- */
+  // 45 characters named "Clone N": 8 pages of 6 cards, spread over 3 API pages of 20
+  const CLONES = Array.from({ length: 45 }, (_, i) =>
+    mkChar(100 + i, `Clone ${i + 1}`, 'Human', 'Alive', (i % 3) + 1, (i % 4) + 1)
+  );
+  const pager = (page) => page.getByTestId('pagination');
+  const pageInfo = (page) => page.getByTestId('page-info');
+
+  test('"rick" (7 results) shows 2 pages and the 7th character on page 2', async ({ page }) => {
+    const s = await openPage(page);
+    await expect(cards(page)).toHaveCount(6);
+    await expect(pageInfo(page)).toHaveText('Página 1 de 2');
+    await expect(status(page)).toContainText('7 resultado(s)');
+    await expect(page.getByTestId('page-prev')).toBeDisabled();
+    await expect(pager(page).getByRole('button', { name: 'Página 1' })).toHaveAttribute('aria-current', 'page');
+
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(cards(page)).toHaveCount(1);
+    await expect(cards(page).first()).toContainText('Tiny Rick');
+    await expect(pageInfo(page)).toHaveText('Página 2 de 2');
+    await expect(page.getByTestId('page-next')).toBeDisabled();
+    // API page 1 is cached: only location + episode are requested for the new page
+    expect(s.calls.map((c) => c.kind).sort()).toEqual(['episode', 'location']);
+
+    await page.getByTestId('page-prev').click();
+    await expect(cards(page)).toHaveCount(6);
+    await expect(cards(page).first()).toContainText('Rick Sanchez');
+  });
+
+  test('page numbers jump directly and map to the right API pages', async ({ page }) => {
+    const s = await openPage(page, { characters: CLONES });
+    await expect(pageInfo(page)).toHaveText('Página 1 de 8');
+    await expect(pager(page)).toContainText('…');
+
+    // Page 4 = items 19..24 -> crosses API pages 1 (cached) and 2
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(pageInfo(page)).toHaveText('Página 2 de 8');
+    await pager(page).getByRole('button', { name: 'Página 3' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 3 de 8');
+    await pager(page).getByRole('button', { name: 'Página 4' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 4 de 8');
+    expect(await names(page)).toEqual(['Clone 19', 'Clone 20', 'Clone 21', 'Clone 22', 'Clone 23', 'Clone 24']);
+    expect(s.calls.filter((c) => c.kind === 'character').map((c) => c.page)).toEqual([2]);
+
+    // Last page: 45 - 42 = 3 cards, from API page 3
+    await pager(page).getByRole('button', { name: 'Página 8' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 8 de 8');
+    expect(await names(page)).toEqual(['Clone 43', 'Clone 44', 'Clone 45']);
+    expect(s.calls.filter((c) => c.kind === 'character').map((c) => c.page)).toEqual([2, 3]);
+  });
+
+  test('a new search goes back to page 1', async ({ page }) => {
+    await openPage(page);
+    await page.getByTestId('page-next').click();
+    await expect(pageInfo(page)).toHaveText('Página 2 de 2');
+    await input(page).fill('morty');
+    await input(page).press('Enter');
+    await expect(cards(page).first()).toContainText('Morty Smith');
+    await expect(pager(page)).toBeHidden(); // 2 Mortys: a single page
+  });
+
+  test('season search is paginated on the client (only /location per page)', async ({ page }) => {
+    const s = await openPage(page);
+    await expect(cards(page)).toHaveCount(6);
+    s.calls.length = 0;
+    await input(page).fill('temporada 1'); // S01E01..S01E04 -> 7 different characters
+    await input(page).press('Enter');
+    await expect(status(page)).toContainText('"temporada 1"');
+    await expect(pageInfo(page)).toHaveText('Página 1 de 2');
+    expect(s.calls.map((c) => c.kind)).toEqual(['episodeFilter', 'characterBatch', 'location']);
+    await expect(cards(page)).toHaveCount(6);
+
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(cards(page)).toHaveCount(1);
+    expect(s.calls.map((c) => c.kind)).toEqual(['location']);
+  });
+
+  test('pagination is hidden on errors and when there are no results', async ({ page }) => {
+    await openPage(page);
+    await expect(pager(page)).toBeVisible();
+    await input(page).fill('zzz');
+    await input(page).press('Enter');
+    await expect(status(page)).toHaveAttribute('data-state', 'empty');
+    await expect(pager(page)).toBeHidden();
   });
 
   /* ---------------------------- Responsive ---------------------------- */
