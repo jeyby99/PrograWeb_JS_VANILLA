@@ -68,3 +68,12 @@ jobs:
             echo '```'
             echo "Immutable tag: \`$TAG\`"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # test branch only: deploy the image that was just published to the AWS test server
+  deploy-test:
+    needs: publish
+    if: github.ref == 'refs/heads/test'
+    uses: ./.github/workflows/deploy-test.yml
+    with:
+      image-tag: ${{ needs.publish.outputs.image-tag }}
+    secrets: inherit
