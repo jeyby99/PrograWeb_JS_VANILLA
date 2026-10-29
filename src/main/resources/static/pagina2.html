@@ -96,6 +96,31 @@
             color: #555;
         }
 
+        /* Flexbox: pagination bar, wraps on small screens */
+        .pagination-bar {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: center;
+            align-items: center;
+            gap: 8px;
+            margin-top: 24px;
+        }
+        .pagination-bar[hidden] { display: none; }
+        .page-btn {
+            min-width: 40px;
+            padding: 8px 12px;
+            border: 1px solid var(--azul);
+            background: #fff;
+            color: var(--azul);
+            cursor: pointer;
+            font-size: 15px;
+        }
+        .page-btn:hover:not(:disabled), .page-btn:focus-visible { background: #e6eef2; }
+        .page-btn.active { background: var(--azul); color: #fff; font-weight: bold; }
+        .page-btn:disabled { opacity: .45; cursor: default; }
+        .page-gap { color: #555; padding: 0 4px; }
+        .page-info { flex-basis: 100%; text-align: center; color: #555; font-size: 14px; }
+
         /* Media queries: 3 columns on desktop, 2 on tablet, 1 on mobile */
         @media (max-width: 991.98px) {
             .grid-container { grid-template-columns: repeat(2, 1fr); gap: 20px; }
@@ -116,7 +141,7 @@
             <div class="input-group">
                 <input type="text" id="searchInput" class="form-control" autocomplete="off"
                        aria-label="Buscar personaje" aria-describedby="statusMessage"
-                       placeholder="Barra de busqueda (ej: rick, morty, summer)">
+                       placeholder="Barra de busqueda (ej: rick, morty temporada 4, morty cap 2, S04E02)">
                 <button id="btnBuscar" class="btn btn-light" type="submit">Buscar</button>
             </div>
         </form>
@@ -126,6 +151,9 @@
 
     <!-- Results grid -->
     <div id="resultadosGrid" class="grid-container"></div>
+
+    <!-- Pagination (6 characters per page) -->
+    <nav id="pagination" class="pagination-bar" aria-label="Paginación de resultados" data-testid="pagination" hidden></nav>
 </div>
 
 <script>
@@ -140,7 +168,8 @@ if (!window.jQuery) {
     const API_BASE = 'https://rickandmortyapi.com/api';
     const IMG_HOST = 'https://rickandmortyapi.com/';   // only images from this origin are accepted
     const DEBOUNCE_MS = 4000;                          // 4-second wait
-    const MAX_CARDS = 6;                               // 3 columns x 2 rows
+    const MAX_CARDS = 6;                               // 3 columns x 2 rows = one page
+    const API_PAGE_SIZE = 20;                          // characters per page in the API
     const DEFAULT_QUERY = 'rick';                      // initial search
     const MIN_LEN = 2;
     const MAX_LEN = 30;
@@ -154,7 +183,9 @@ if (!window.jQuery) {
     const $input = $('#searchInput');
     const $grid = $('#resultadosGrid');
     const $status = $('#statusMessage');
+    const $pagination = $('#pagination');
 
+    let current = null;     // current search: { query, page, search }
     let debounceId = null;
     let countdownId = null;
     let searchSeq = 0;      // id of the current search (stale responses are dropped)
@@ -188,7 +219,46 @@ if (!window.jQuery) {
         if (!NAME_RE.test(value)) {
             return { ok: false, error: 'Solo se permiten letras, números, espacios, punto, apóstrofe y guion.' };
         }
+        const parsed = parseQuery(value);
+        if (!parsed.ok) return { ok: false, error: parsed.error };
         return { ok: true, value: value };
+    }
+
+    /* ---------------- Query parsing: name + optional season / episode ----------------
+       The /episode endpoint filters by episode code and accepts partial codes:
+       "S04" = whole season 4, "E04" = episode 4 of every season, "S04E02" = one episode.
+       Examples: "morty temporada 4" -> {name: "morty", code: "S04"}
+                 "morty cap 4"       -> {name: "morty", code: "E04"}
+                 "morty T4 cap 2"    -> {name: "morty", code: "S04E02"} */
+    const CODE_RE = /\bs\s*(\d{1,2})\s*e\s*(\d{1,2})\b/;
+    const SEASON_RE = /\b(?:temporada|temp|season|t|s)\s*(\d{1,2})\b/;
+    const EPISODE_RE = /\b(?:capitulo|cap|episodio|episode|ep|e)\s*(\d{1,2})\b/;
+    const FILLER_RE = /\b(?:de|del|la|el|en|y|in|of|the|and|from)\b/g;
+
+    // Lower case without accents, so "Capítulo" and "capitulo" match the same way.
+    const normalize = function (s) {
+        return String(s).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+    };
+    const pad2 = function (n) { return String(Number(n)).padStart(2, '0'); };
+
+    function parseQuery(value) {
+        let rest = ' ' + normalize(value) + ' ';
+        let season = null;
+        let episode = null;
+
+        let m = CODE_RE.exec(rest);
+        if (m) { season = m[1]; episode = m[2]; rest = rest.replace(m[0], ' '); }
+        if (season === null && (m = SEASON_RE.exec(rest))) { season = m[1]; rest = rest.replace(m[0], ' '); }
+        if (episode === null && (m = EPISODE_RE.exec(rest))) { episode = m[1]; rest = rest.replace(m[0], ' '); }
+
+        if ((season !== null && Number(season) < 1) || (episode !== null && Number(episode) < 1)) {
+            return { ok: false, error: 'La temporada y el capítulo deben ser mayores que 0.' };
+        }
+        if (season === null && episode === null) return { ok: true, name: value, code: null };
+
+        const code = (season !== null ? 'S' + pad2(season) : '') + (episode !== null ? 'E' + pad2(episode) : '');
+        const name = rest.replace(FILLER_RE, ' ').replace(/\s+/g, ' ').trim();
+        return { ok: true, name: name, code: code };
     }
 
     function markInvalid(isInvalid) {
@@ -217,12 +287,18 @@ if (!window.jQuery) {
         );
     }
 
-    // Endpoint 1: /character/?name=...
-    function fetchCharacters(name) {
-        return ajaxJSON(API_BASE + '/character/?name=' + encodeURIComponent(name));
+    // Endpoint 1: /character/?name=...&page=N (the API returns up to 20 characters per page)
+    function fetchCharacters(name, apiPage) {
+        return ajaxJSON(API_BASE + '/character/?name=' + encodeURIComponent(name) +
+                        (apiPage > 1 ? '&page=' + apiPage : ''));
     }
 
-    // Endpoints 2 and 3: /location/{ids} and /episode/{ids} (several ids in one request)
+    // Endpoint 3 used as a filter: /episode/?episode=S04 (season), E04 (episode number) or S04E02
+    function fetchEpisodesByCode(code) {
+        return ajaxJSON(API_BASE + '/episode/?episode=' + encodeURIComponent(code));
+    }
+
+    // Batches: /character/{ids}, /location/{ids} and /episode/{ids} (several ids in one request)
     function fetchBatch(kind, ids) {
         if (!ids.length) return $.Deferred().resolve([]).promise();
         return ajaxJSON(API_BASE + '/' + kind + '/' + ids.join(',')).then(toArray);
@@ -253,39 +329,145 @@ if (!window.jQuery) {
         });
     }
 
-    const locIdOf = function (c) { return idFromUrl(c.location && c.location.url); };
-    const epIdOf = function (c) { return idFromUrl(Array.isArray(c.episode) ? c.episode[0] : null); };
-
-    /* ---------------- Chained requests ----------------
-       1) /character      -> gets the characters
-       2) with that data  -> /location/{ids} and /episode/{ids} in parallel
-       3) the 3 responses are combined into one card per character */
-    function buscarPersonajes(name, seq) {
-        return fetchCharacters(name).then(function (data) {
-            const chars = validateCharacters(data).slice(0, MAX_CARDS);
-            if (seq !== searchSeq) return $.Deferred().reject({ stale: true }).promise();
-
-            const locIds = uniq(chars.map(locIdOf));
-            const epIds = uniq(chars.map(epIdOf));
-
-            return $.when(
-                settle(fetchBatch('location', locIds)),
-                settle(fetchBatch('episode', epIds))
-            ).then(function (locRes, epRes) {
-                return {
-                    chars: chars,
-                    locations: indexById(locRes.data),
-                    episodes: indexById(epRes.data),
-                    partial: !locRes.ok || !epRes.ok
-                };
-            });
+    function validateEpisodes(data) {
+        if (!data || !Array.isArray(data.results)) throw new Error('Respuesta inválida: falta "results"');
+        return data.results.filter(function (e) {
+            return e && Number.isInteger(e.id) && typeof e.episode === 'string' && Array.isArray(e.characters);
         });
     }
 
+    const locIdOf = function (c) { return idFromUrl(c.location && c.location.url); };
+    const epIdOf = function (c) { return idFromUrl(Array.isArray(c.episode) ? c.episode[0] : null); };
+
+    const resolved = function (value) { return $.Deferred().resolve(value).promise(); };
+    const staleIf = function (seq) {
+        return seq !== searchSeq ? $.Deferred().reject({ stale: true }).promise() : null;
+    };
+
+    /* ---------------- Chained requests (name only) ----------------
+       1) /character?name=...&page=N -> the characters of the requested 6-card page
+       2) with that data             -> /location/{ids} and /episode/{ids} in parallel
+       3) the 3 responses are combined into one card per character
+       Each 6-card page is mapped to the 20-item API page(s) that contain it; API pages
+       already fetched are kept in a cache, so going back does not repeat requests. */
+    function crearBusquedaPorNombre(name) {
+        const apiPages = {};
+        let total = 0;
+
+        function apiPage(n) {
+            if (apiPages[n]) return resolved(apiPages[n]);
+            return fetchCharacters(name, n).then(function (data) {
+                const list = validateCharacters(data);
+                total = data.info && Number.isInteger(data.info.count) ? data.info.count : list.length;
+                apiPages[n] = list;
+                return list;
+            });
+        }
+
+        function pageOfCharacters(page, seq) {
+            const start = (page - 1) * MAX_CARDS;
+            const first = Math.floor(start / API_PAGE_SIZE) + 1;
+            const last = Math.floor((start + MAX_CARDS - 1) / API_PAGE_SIZE) + 1;
+            const offset = start - (first - 1) * API_PAGE_SIZE;
+
+            return apiPage(first).then(function (a) {
+                const stale = staleIf(seq);
+                if (stale) return stale;
+                const next = last !== first && total > first * API_PAGE_SIZE ? apiPage(last) : resolved([]);
+                return next.then(function (b) {
+                    return a.concat(b).slice(offset, offset + MAX_CARDS);
+                });
+            });
+        }
+
+        return {
+            load: function (page, seq) {
+                return pageOfCharacters(page, seq).then(function (chars) {
+                    const stale = staleIf(seq);
+                    if (stale) return stale;
+                    return $.when(
+                        settle(fetchBatch('location', uniq(chars.map(locIdOf)))),
+                        settle(fetchBatch('episode', uniq(chars.map(epIdOf))))
+                    ).then(function (locRes, epRes) {
+                        const episodes = indexById(epRes.data);
+                        return {
+                            chars: chars,
+                            total: total,
+                            locations: indexById(locRes.data),
+                            episodeLabel: 'Primer episodio',
+                            episodeFor: function (c) { return episodes[epIdOf(c)]; },
+                            partial: !locRes.ok || !epRes.ok
+                        };
+                    });
+                });
+            }
+        };
+    }
+
+    /* ---------------- Chained requests with a season / episode filter ----------------
+       1) /episode?episode=CODE -> matching episodes and the ids of their characters
+       2) /character/{ids}      -> those characters, filtered by name on the client
+       3) /location/{ids}       -> location details for the cards shown
+       Steps 1 and 2 run once per search; changing page only repeats step 3.
+       The card shows the first matching episode the character appears in. */
+    function crearBusquedaPorEpisodio(name, code) {
+        let matches = null;          // promise: { list, matchOf }
+
+        function allMatches(seq) {
+            if (matches) return matches;
+            matches = fetchEpisodesByCode(code).then(function (data) {
+                const episodes = validateEpisodes(data);
+                const stale = staleIf(seq);
+                if (stale) return stale;
+
+                const matchOf = {};  // character id -> first matching episode
+                episodes.forEach(function (ep) {
+                    ep.characters.forEach(function (url) {
+                        const id = idFromUrl(url);
+                        if (id !== null && !matchOf[id]) matchOf[id] = ep;
+                    });
+                });
+
+                return fetchBatch('character', Object.keys(matchOf).map(Number)).then(function (list) {
+                    const wanted = normalize(name);
+                    return {
+                        list: validateCharacters({ results: list }).filter(function (c) {
+                            return normalize(c.name).indexOf(wanted) !== -1;
+                        }),
+                        matchOf: matchOf
+                    };
+                });
+            });
+            // A failed or cancelled attempt must not stay cached
+            matches.fail(function () { matches = null; });
+            return matches;
+        }
+
+        return {
+            load: function (page, seq) {
+                return allMatches(seq).then(function (m) {
+                    const stale = staleIf(seq);
+                    if (stale) return stale;
+                    const chars = m.list.slice((page - 1) * MAX_CARDS, page * MAX_CARDS);
+                    return settle(fetchBatch('location', uniq(chars.map(locIdOf)))).then(function (locRes) {
+                        return {
+                            chars: chars,
+                            total: m.list.length,
+                            locations: indexById(locRes.data),
+                            episodeLabel: 'Episodio',
+                            episodeFor: function (c) { return m.matchOf[c.id]; },
+                            partial: !locRes.ok
+                        };
+                    });
+                });
+            }
+        };
+    }
+
     /* ---------------- Render cards (using .text(): no HTML injection risk) ---------------- */
-    function buildCard(c, locations, episodes) {
-        const loc = locations[locIdOf(c)];
-        const ep = episodes[epIdOf(c)];
+    function buildCard(c, result) {
+        const loc = result.locations[locIdOf(c)];
+        const ep = result.episodeFor(c);
         const $card = $('<article class="card-item shadow-md" data-testid="character-card"></article>');
 
         $('<p class="name"></p>').text(c.name).appendTo($card);
@@ -297,7 +479,7 @@ if (!window.jQuery) {
             $('<p class="meta"></p>').text('Dimensión: ' + loc.dimension).appendTo($card);
         }
         $('<p class="meta"></p>')
-            .text('Primer episodio: ' + (ep ? ep.episode + ' - ' + ep.name : 'No disponible'))
+            .text(result.episodeLabel + ': ' + (ep ? ep.episode + ' - ' + ep.name : 'No disponible'))
             .appendTo($card);
 
         const src = typeof c.image === 'string' && c.image.indexOf(IMG_HOST) === 0 ? c.image : FALLBACK_IMG;
@@ -311,49 +493,122 @@ if (!window.jQuery) {
     function renderCards(result) {
         $grid.empty();
         result.chars.forEach(function (c) {
-            $grid.append(buildCard(c, result.locations, result.episodes));
+            $grid.append(buildCard(c, result));
         });
     }
 
-    /* ---------------- Run a search ---------------- */
-    function runSearch(query) {
+    /* ---------------- Pagination: « Anterior | 1 … 4 5 6 … 12 | Siguiente » ---------------- */
+    // Page numbers to show: first, last and the neighbours of the current page; null = "…"
+    function pageWindow(current, totalPages) {
+        const pages = [];
+        for (let p = 1; p <= totalPages; p++) {
+            if (p === 1 || p === totalPages || Math.abs(p - current) <= 1) pages.push(p);
+            else if (pages[pages.length - 1] !== null) pages.push(null);
+        }
+        return pages;
+    }
+
+    function pageButton(label, page, opts) {
+        return $('<button type="button" class="page-btn"></button>')
+            .text(label)
+            .attr({ 'data-page': page, 'aria-label': opts.ariaLabel || 'Página ' + page })
+            .attr('aria-current', opts.current ? 'page' : null)
+            .toggleClass('active', !!opts.current)
+            .prop('disabled', !!opts.disabled);
+    }
+
+    function renderPagination(page, totalPages) {
+        $pagination.empty();
+        if (totalPages <= 1) { $pagination.prop('hidden', true); return; }
+
+        $pagination.append(pageButton('« Anterior', page - 1, { disabled: page === 1, ariaLabel: 'Página anterior' })
+            .attr('data-testid', 'page-prev'));
+        pageWindow(page, totalPages).forEach(function (p) {
+            if (p === null) $('<span class="page-gap" aria-hidden="true">…</span>').appendTo($pagination);
+            else $pagination.append(pageButton(String(p), p, { current: p === page }));
+        });
+        $pagination.append(pageButton('Siguiente »', page + 1, { disabled: page === totalPages, ariaLabel: 'Página siguiente' })
+            .attr('data-testid', 'page-next'));
+        $('<span class="page-info" data-testid="page-info"></span>')
+            .text('Página ' + page + ' de ' + totalPages)
+            .appendTo($pagination);
+        $pagination.prop('hidden', false);
+    }
+
+    function hidePagination() {
+        $pagination.empty().prop('hidden', true);
+    }
+
+    /* ---------------- Run a search / load a page ---------------- */
+    function showError(query, a, b) {
+        hidePagination();
+        if (a && a.status === 404) {                  // the API answers 404 when nothing matches
+            setStatus('empty', 'No se encontraron resultados para "' + query + '".');
+            renderEmpty('Sin resultados. Prueba con otro nombre.');
+            return;
+        }
+        let msg = '⚠️ La respuesta de la API no es válida.';
+        if (b === 'timeout') msg = '⌛ La API tardó demasiado en responder. Intenta de nuevo.';
+        else if (a && a.status === 429) msg = '🚦 Demasiadas peticiones a la API. Espera un momento.';
+        else if (a && a.status >= 500) msg = '❌ La API tuvo un problema (error ' + a.status + ').';
+        else if (a && a.status === 0) msg = '📡 Sin conexión con la API.';
+        setStatus('error', msg);
+        renderEmpty('No se pudieron cargar los personajes.');
+    }
+
+    function loadPage(page) {
         abortInflight();
         const seq = ++searchSeq;
-        setStatus('loading', '🔎 Buscando "' + query + '"...');
+        const query = current.query;
+        setStatus('loading', page === 1 ? '🔎 Buscando "' + query + '"...' : '🔎 Cargando página ' + page + '...');
 
-        buscarPersonajes(query, seq)
+        current.search.load(page, seq)
             .then(function (result) {
                 if (seq !== searchSeq) return;
                 if (!result.chars.length) {
+                    hidePagination();
                     setStatus('empty', 'No se encontraron resultados para "' + query + '".');
                     renderEmpty('Sin resultados. Prueba con otro nombre.');
                     return;
                 }
+                const totalPages = Math.max(1, Math.ceil(result.total / MAX_CARDS));
+                current.page = page;
                 renderCards(result);
+                renderPagination(page, totalPages);
                 if (result.partial) {
                     setStatus('partial', '⚠️ Algunos detalles (ubicación o episodio) no están disponibles.');
                 } else {
-                    setStatus('ok', '✅ ' + result.chars.length + ' resultado(s) para "' + query + '".');
+                    setStatus('ok', '✅ ' + result.total + ' resultado(s) para "' + query + '"' +
+                              (totalPages > 1 ? ' · página ' + page + ' de ' + totalPages : '') + '.');
                 }
             })
             .catch(function (a, b) {
                 if (seq !== searchSeq) return;
                 if (a && a.stale) return;
                 if (b === 'abort') return;
-                if (a && a.status === 404) {          // the API answers 404 when nothing matches
-                    setStatus('empty', 'No se encontraron resultados para "' + query + '".');
-                    renderEmpty('Sin resultados. Prueba con otro nombre.');
-                    return;
-                }
-                let msg = '⚠️ La respuesta de la API no es válida.';
-                if (b === 'timeout') msg = '⌛ La API tardó demasiado en responder. Intenta de nuevo.';
-                else if (a && a.status === 429) msg = '🚦 Demasiadas peticiones a la API. Espera un momento.';
-                else if (a && a.status >= 500) msg = '❌ La API tuvo un problema (error ' + a.status + ').';
-                else if (a && a.status === 0) msg = '📡 Sin conexión con la API.';
-                setStatus('error', msg);
-                renderEmpty('No se pudieron cargar los personajes.');
+                showError(query, a, b);
             });
     }
+
+    function runSearch(query) {
+        const parsed = parseQuery(query);
+        current = {
+            query: query,
+            page: 1,
+            search: parsed.code
+                ? crearBusquedaPorEpisodio(parsed.name, parsed.code)
+                : crearBusquedaPorNombre(parsed.name)
+        };
+        loadPage(1);
+    }
+
+    $pagination.on('click', '.page-btn', function () {
+        const page = Number($(this).attr('data-page'));
+        if (!current || !page || page === current.page) return;
+        clearTimers();
+        loadPage(page);
+        $grid[0].scrollIntoView({ block: 'nearest' });
+    });
 
     /* ---------------- 4-second debounce ---------------- */
     function clearTimers() {

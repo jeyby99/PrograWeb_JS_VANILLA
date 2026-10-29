@@ -192,6 +192,17 @@ Queries the project's backend on every keystroke and displays the records as car
 - **Response validation:** checks that `results` is an array and that each item has an `id` and a `name`; images are accepted only from the API's own host; text is inserted with `.text()` so no HTML from the API is executed.
 - **Error handling:** no results (404), server error, timeout, no connection and partial failure each show their own message. Old responses are ignored when a newer search was made.
 - **Responsive:** CSS Grid with 3 columns (desktop), 2 (tablet) and 1 (mobile) using Media Queries; Flexbox for the search bar and the cards; Bootstrap and Tailwind utility classes.
+- **Search by season / episode:** the query is split into a name and an episode code, as supported by `/episode?episode=` (partial codes):
+
+| Input | Episode code | Meaning |
+|---|---|---|
+| `morty temporada 4`, `morty season 4`, `morty T4` | `S04` | Mortys in season 4 |
+| `morty cap 4`, `morty capítulo 4`, `morty episodio 4`, `morty ep 4` | `E04` | Mortys in episode 4 of any season |
+| `morty temporada 4 cap 2`, `morty S04E02` | `S04E02` | Mortys in that episode |
+| `temporada 4` | `S04` | every character in season 4 |
+
+  With a code, the chain is `/episode?episode=CODE` → `/character/{ids}` (filtered by name) → `/location/{ids}`, and each card shows the matching episode.
+- **Pagination:** 6 characters per page with `« Anterior`, page numbers and `Siguiente »`. Name searches map each page to the API's 20-item pages (cached); season/episode searches paginate on the client and only request `/location` per page.
 - On load, the page shows "Rick" characters by default.
 
 ## Testing with Playwright
@@ -205,6 +216,8 @@ The tests are in `e2e/pagina2.spec.js` and check Page 2:
 - **Input validation:** invalid values (too short, too long, `<script>`, SQL-like text, `../`) send no request.
 - **Response handling:** no results, HTTP 500, no connection, partial failure (`/episode` or `/location` down), old responses ignored, and HTML in API data is not executed.
 - **Responsive:** 3, 2 and 1 columns at 1280, 820 and 375 px, with no horizontal scroll.
+- **Season / episode search:** request order, character ids taken from the episodes, and the parsing of Spanish/English keywords and codes.
+- **Pagination:** next/previous, jumping by page number across API pages, cache, client-side paging for season searches, hidden when not needed.
 - `@live`: one optional test that calls the real API.
 
 Normal tests use **simulated API responses** (mock data), so they are fast and do not need internet. The `@live` test uses the real API.

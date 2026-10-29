@@ -33,11 +33,18 @@ const LOCATIONS = {
   2: { id: 2, name: 'Citadel of Ricks', type: 'Space station', dimension: 'unknown' },
   3: { id: 3, name: 'Abadango', type: 'Cluster', dimension: 'unknown' },
 };
+// `cast` = ids of the characters seen in each episode (the API returns them as URLs)
+function mkEpisode(id, name, episode, cast) {
+  return { id, name, episode, air_date: `Mock date ${id}`, characters: cast.map((c) => `${API}/character/${c}`) };
+}
 const EPISODES = {
-  1: { id: 1, name: 'Pilot', episode: 'S01E01', air_date: 'Mock date 1' },
-  2: { id: 2, name: 'Lawnmower Dog', episode: 'S01E02', air_date: 'Mock date 2' },
-  3: { id: 3, name: 'Anatomy Park', episode: 'S01E03', air_date: 'Mock date 3' },
-  4: { id: 4, name: 'M. Night Shaym-Aliens!', episode: 'S01E04', air_date: 'Mock date 4' },
+  1: mkEpisode(1, 'Pilot', 'S01E01', [1, 8]),
+  2: mkEpisode(2, 'Lawnmower Dog', 'S01E02', [1, 2, 8]),
+  3: mkEpisode(3, 'Anatomy Park', 'S01E03', [3, 9]),
+  4: mkEpisode(4, 'M. Night Shaym-Aliens!', 'S01E04', [1, 4, 8, 10]),
+  5: mkEpisode(5, 'Total Rickall', 'S02E04', [1, 8, 9]),
+  6: mkEpisode(6, 'The Old Man and the Seat', 'S04E02', [1, 8, 9, 10]),
+  7: mkEpisode(7, 'Claw and Hoarder', 'S04E04', [2, 8, 9]),
 };
 
 function mkChar(id, name, species, status, locId, epId) {
@@ -116,7 +123,8 @@ async function setup(page, opts = {}) {
 
       if (url.pathname === '/api/character/' || url.pathname === '/api/character') {
         const query = url.searchParams.get('name');
-        calls.push({ kind: 'character', query, url: req.url(), type: req.resourceType(), order: ++order });
+        const apiPage = Number(url.searchParams.get('page') || 1);
+        calls.push({ kind: 'character', query, page: apiPage, url: req.url(), type: req.resourceType(), order: ++order });
         if (opts.characterDelay) await sleep(opts.characterDelay(query));
         if (opts.abortCharacter) return await route.abort('failed');
         if (opts.characterStatus) return await json(opts.characterStatus, { error: 'mock error' });
@@ -124,17 +132,31 @@ async function setup(page, opts = {}) {
         const list = opts.characters
           ? opts.characters
           : CHARACTERS.filter((c) => c.name.toLowerCase().includes((query || '').toLowerCase()));
+        // Same pagination as the real API: 20 per page, 404 past the last page
+        const pages = Math.ceil(list.length / 20);
+        if (!list.length || apiPage > pages) return await json(404, { error: 'There is nothing here' });
+        const results = list.slice((apiPage - 1) * 20, apiPage * 20);
+        return await json(200, { info: { count: list.length, pages, next: null, prev: null }, results });
+      }
+
+      // Episode filter by code, partial match like the real API: S04, E04, S04E02
+      if ((url.pathname === '/api/episode/' || url.pathname === '/api/episode') && url.searchParams.has('episode')) {
+        const code = url.searchParams.get('episode');
+        calls.push({ kind: 'episodeFilter', code, url: req.url(), type: req.resourceType(), order: ++order });
+        if (opts.episodeFilterStatus) return await json(opts.episodeFilterStatus, { error: 'mock error' });
+        const list = Object.values(EPISODES).filter((e) => e.episode.toLowerCase().includes(code.toLowerCase()));
         if (!list.length) return await json(404, { error: 'There is nothing here' });
         return await json(200, { info: { count: list.length, pages: 1, next: null, prev: null }, results: list });
       }
 
-      const m = /^\/api\/(location|episode)\/([\d,]+)$/.exec(url.pathname);
+      const m = /^\/api\/(location|episode|character)\/([\d,]+)$/.exec(url.pathname);
       if (m) {
-        const kind = m[1];
+        const kind = m[1] === 'character' ? 'characterBatch' : m[1];
         const ids = m[2].split(',').map(Number);
         calls.push({ kind, ids, url: req.url(), type: req.resourceType(), order: ++order });
         if (opts[`${kind}Status`]) return await json(opts[`${kind}Status`], { error: 'mock error' });
-        const table = kind === 'location' ? LOCATIONS : EPISODES;
+        const table =
+          kind === 'location' ? LOCATIONS : kind === 'episode' ? EPISODES : Object.fromEntries(CHARACTERS.map((c) => [c.id, c]));
         const found = ids.map((i) => table[i]).filter(Boolean);
         // Same as the real API: one id returns an object; several ids, an array
         return await json(200, ids.length === 1 ? found[0] : found);
@@ -392,6 +414,183 @@ test.describe('Page 2 - Rick and Morty', () => {
     await expect(cards(page).first().locator('.name')).toHaveText('<img src=x onerror="window.__xss=1">');
     await expect(cards(page).first().locator('.name img')).toHaveCount(0);
     expect(await page.evaluate(() => window.__xss)).toBeUndefined();
+  });
+
+  /* ------------------- Search by season / episode ------------------- */
+  // Waits for the initial "rick" search, clears the call log and runs a new search with Enter.
+  async function searchNow(page, s, text) {
+    await expect(cards(page)).toHaveCount(6);
+    s.calls.length = 0;
+    await input(page).fill(text);
+    await input(page).press('Enter');
+  }
+  const names = (page) => cards(page).locator('.name').allTextContents();
+
+  test('"morty cap 4" chains episode -> character -> location', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'morty cap 4');
+
+    await expect(cards(page)).toHaveCount(2);
+    expect(await names(page)).toEqual(['Morty Smith', 'Evil Morty']);
+    expect(s.calls.map((c) => c.kind)).toEqual(['episodeFilter', 'characterBatch', 'location']);
+    expect(s.calls[0].code).toBe('E04');
+    // Character ids come from the episodes returned by the first request (S01E04, S02E04, S04E04)
+    expect(s.calls[1].ids.sort((a, b) => a - b)).toEqual([1, 2, 4, 8, 9, 10]);
+    // The card shows the first matching episode, not the first episode of the character
+    await expect(cards(page).first()).toContainText('Episodio: S01E04 - M. Night Shaym-Aliens!');
+    await expect(cards(page).nth(1)).toContainText('Episodio: S02E04 - Total Rickall');
+    await expect(cards(page).first()).toContainText('Ubicación: Earth (C-137) (Planet)');
+    await expect(status(page)).toHaveAttribute('data-state', 'ok');
+  });
+
+  test('"morty temporada 4" returns the Mortys of season 4', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'morty temporada 4');
+    await expect(cards(page)).toHaveCount(2);
+    expect(s.calls[0].code).toBe('S04');
+    await expect(cards(page).first()).toContainText('Episodio: S04E02 - The Old Man and the Seat');
+  });
+
+  test('"temporada 4" without a name returns every character of the season', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'temporada 4');
+    await expect(cards(page)).toHaveCount(5);
+    expect((await names(page)).sort()).toEqual(['Evil Morty', 'Evil Rick', 'Morty Smith', 'Mr. Meeseeks', 'Rick Sanchez']);
+  });
+
+  const codeCases = [
+    ['morty season 4', 'S04'],
+    ['morty T4', 'S04'],
+    ['Morty de la Temporada 4', 'S04'],
+    ['morty capítulo 4', 'E04'],
+    ['morty episodio 04', 'E04'],
+    ['morty ep 4', 'E04'],
+    ['morty episode 4', 'E04'],
+    ['morty temporada 4 cap 2', 'S04E02'],
+    ['morty S04E02', 'S04E02'],
+    ['morty s4 e2', 'S04E02'],
+  ];
+  for (const [text, code] of codeCases) {
+    test(`parses "${text}" as episode code ${code}`, async ({ page }) => {
+      const s = await openPage(page);
+      await searchNow(page, s, text);
+      await expect(cards(page).first()).toContainText(/morty/i);
+      expect(s.calls[0]).toMatchObject({ kind: 'episodeFilter', code });
+      expect(s.calls.some((c) => c.kind === 'character')).toBe(false); // no name-only search
+    });
+  }
+
+  test('a name alone keeps the name-only search', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'morty');
+    await expect(cards(page).first()).toContainText('Primer episodio: S01E01 - Pilot');
+    expect(s.calls[0]).toMatchObject({ kind: 'character', query: 'morty' });
+    expect(s.calls.some((c) => c.kind === 'episodeFilter')).toBe(false);
+  });
+
+  test('unknown season (API 404): no results and no character request', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'rick temporada 9');
+    await expect(status(page)).toHaveAttribute('data-state', 'empty');
+    await expect(page.getByTestId('empty-state')).toBeVisible();
+    expect(s.calls.map((c) => c.kind)).toEqual(['episodeFilter']);
+  });
+
+  test('season or episode 0 is rejected before sending the request', async ({ page }) => {
+    const s = await openPage(page);
+    await searchNow(page, s, 'morty cap 0');
+    await expect(status(page)).toHaveAttribute('data-state', 'invalid');
+    await page.waitForTimeout(300);
+    expect(s.calls).toHaveLength(0);
+  });
+
+  /* ---------------------------- Pagination ---------------------------- */
+  // 45 characters named "Clone N": 8 pages of 6 cards, spread over 3 API pages of 20
+  const CLONES = Array.from({ length: 45 }, (_, i) =>
+    mkChar(100 + i, `Clone ${i + 1}`, 'Human', 'Alive', (i % 3) + 1, (i % 4) + 1)
+  );
+  const pager = (page) => page.getByTestId('pagination');
+  const pageInfo = (page) => page.getByTestId('page-info');
+
+  test('"rick" (7 results) shows 2 pages and the 7th character on page 2', async ({ page }) => {
+    const s = await openPage(page);
+    await expect(cards(page)).toHaveCount(6);
+    await expect(pageInfo(page)).toHaveText('Página 1 de 2');
+    await expect(status(page)).toContainText('7 resultado(s)');
+    await expect(page.getByTestId('page-prev')).toBeDisabled();
+    await expect(pager(page).getByRole('button', { name: 'Página 1' })).toHaveAttribute('aria-current', 'page');
+
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(cards(page)).toHaveCount(1);
+    await expect(cards(page).first()).toContainText('Tiny Rick');
+    await expect(pageInfo(page)).toHaveText('Página 2 de 2');
+    await expect(page.getByTestId('page-next')).toBeDisabled();
+    // API page 1 is cached: only location + episode are requested for the new page
+    expect(s.calls.map((c) => c.kind).sort()).toEqual(['episode', 'location']);
+
+    await page.getByTestId('page-prev').click();
+    await expect(cards(page)).toHaveCount(6);
+    await expect(cards(page).first()).toContainText('Rick Sanchez');
+  });
+
+  test('page numbers jump directly and map to the right API pages', async ({ page }) => {
+    const s = await openPage(page, { characters: CLONES });
+    await expect(pageInfo(page)).toHaveText('Página 1 de 8');
+    await expect(pager(page)).toContainText('…');
+
+    // Page 4 = items 19..24 -> crosses API pages 1 (cached) and 2
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(pageInfo(page)).toHaveText('Página 2 de 8');
+    await pager(page).getByRole('button', { name: 'Página 3' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 3 de 8');
+    await pager(page).getByRole('button', { name: 'Página 4' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 4 de 8');
+    expect(await names(page)).toEqual(['Clone 19', 'Clone 20', 'Clone 21', 'Clone 22', 'Clone 23', 'Clone 24']);
+    expect(s.calls.filter((c) => c.kind === 'character').map((c) => c.page)).toEqual([2]);
+
+    // Last page: 45 - 42 = 3 cards, from API page 3
+    await pager(page).getByRole('button', { name: 'Página 8' }).click();
+    await expect(pageInfo(page)).toHaveText('Página 8 de 8');
+    expect(await names(page)).toEqual(['Clone 43', 'Clone 44', 'Clone 45']);
+    expect(s.calls.filter((c) => c.kind === 'character').map((c) => c.page)).toEqual([2, 3]);
+  });
+
+  test('a new search goes back to page 1', async ({ page }) => {
+    await openPage(page);
+    await page.getByTestId('page-next').click();
+    await expect(pageInfo(page)).toHaveText('Página 2 de 2');
+    await input(page).fill('morty');
+    await input(page).press('Enter');
+    await expect(cards(page).first()).toContainText('Morty Smith');
+    await expect(pager(page)).toBeHidden(); // 2 Mortys: a single page
+  });
+
+  test('season search is paginated on the client (only /location per page)', async ({ page }) => {
+    const s = await openPage(page);
+    await expect(cards(page)).toHaveCount(6);
+    s.calls.length = 0;
+    await input(page).fill('temporada 1'); // S01E01..S01E04 -> 7 different characters
+    await input(page).press('Enter');
+    await expect(status(page)).toContainText('"temporada 1"');
+    await expect(pageInfo(page)).toHaveText('Página 1 de 2');
+    expect(s.calls.map((c) => c.kind)).toEqual(['episodeFilter', 'characterBatch', 'location']);
+    await expect(cards(page)).toHaveCount(6);
+
+    s.calls.length = 0;
+    await page.getByTestId('page-next').click();
+    await expect(cards(page)).toHaveCount(1);
+    expect(s.calls.map((c) => c.kind)).toEqual(['location']);
+  });
+
+  test('pagination is hidden on errors and when there are no results', async ({ page }) => {
+    await openPage(page);
+    await expect(pager(page)).toBeVisible();
+    await input(page).fill('zzz');
+    await input(page).press('Enter');
+    await expect(status(page)).toHaveAttribute('data-state', 'empty');
+    await expect(pager(page)).toBeHidden();
   });
 
   /* ---------------------------- Responsive ---------------------------- */
