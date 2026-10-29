@@ -1,10 +1,12 @@
 # Publishes the application image to GitHub Container Registry
-# (ghcr.io/jeyby99/prograweb) every time main is updated.
+# (ghcr.io/jeyby99/prograweb):
+#   main -> latest + sha-<commit>        (release image)
+#   test -> test   + test-sha-<commit>   (image deployed to the AWS test server)
 name: Publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   workflow_dispatch:
 
 permissions:
@@ -16,7 +18,13 @@ env:
 
 jobs:
   publish:
+    # Only these two branches have images; a manual run from another branch does nothing
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test'
     runs-on: ubuntu-latest
+    outputs:
+      # Exact, immutable tag of this build (sha-<commit> or test-sha-<commit>),
+      # so a deployment never picks up a later push to the same branch
+      image-tag: ${{ steps.tag.outputs.image-tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -32,8 +40,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test,enable=${{ github.ref == 'refs/heads/test' }}
+            type=sha,prefix=test-sha-,enable=${{ github.ref == 'refs/heads/test' }}
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -43,3 +53,18 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Immutable tag of this build
+        id: tag
+        env:
+          PREFIX: ${{ github.ref == 'refs/heads/test' && 'test-sha-' || 'sha-' }}
+        run: |
+          TAG="${PREFIX}${GITHUB_SHA::7}"
+          echo "image-tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Published image"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo '```'
+            echo "Immutable tag: \`$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
