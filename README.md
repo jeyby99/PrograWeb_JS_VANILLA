@@ -16,6 +16,7 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 8. [Project Structure](#project-structure)
 9. [Features](#features)
 10. [Testing with Playwright](#testing-with-playwright)
+    - [Load testing with k6](#load-testing-with-k6)
 11. [How to Run](#how-to-run)
 12. [Run with Docker](#run-with-docker)
 13. [CI/CD](#cicd)
@@ -321,6 +322,42 @@ set BASE_URL=http://localhost:8080 && npm test
 # Windows PowerShell
 $env:BASE_URL="http://localhost:8080"; npm test
 ```
+
+### Load testing with k6
+
+The load balancer is tested with [k6](https://k6.io) (`loadtest/`). k6 runs in Docker, so nothing needs to be installed; reports (HTML dashboard + JSON summary) are written to `loadtest/reports/` (ignored by git).
+
+| Script | Load | What it shows | Pass criteria |
+|---|---|---|---|
+| `smoke.js` | 1 user, 30 s | Everything answers before heavier tests | 0 errors, p95 < 1 s |
+| `load.js` | ramp to 30 users, hold 1 min | Normal expected load | errors < 1%, p95 < 800 ms |
+| `stress.js` | 50 → 100 → 200 → 400 → 600 users, no pauses | **Breaking point**: where latency explodes and requests fail. Expected to fail | marks errors > 5% / p95 > 2 s as broken |
+| `failover.js` | 20 users, 2 min; one instance stopped at ~0:30 and started at ~1:30 | Good vs bad balancer when an instance dies | errors < 1% |
+
+Every script counts responses per instance (`X-Served-By`) in the `served_by` metric; `instance:none` = error responses that never reached an instance.
+
+```bash
+loadtest/run.sh smoke                                    # local docker compose (gateway on :8080)
+loadtest/run.sh load
+loadtest/run.sh stress
+loadtest/failover-demo.sh good                           # local: stops/starts app2 automatically
+loadtest/failover-demo.sh bad                            # same with GATEWAY_PROFILE=bad-balancer
+BASE_URL=http://<elastic-ip>:8080 loadtest/run.sh load   # against the EC2 test server
+```
+
+**Results on a local machine** (Docker Desktop, limits from `docker-compose.yml`):
+
+| Test | Requests | Errors | p95 | Distribution app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 30 | 0% | 41 ms | 10 / 10 / 10 | pass |
+| load (30 users) | 3,509 (33/s) | 0% | 406 ms | 1,180 / 1,165 / 1,164 | pass |
+| stress (up to 600 users) | 13,668 (76/s) | 3.7% (504 timeouts) | **8.7 s** | 4,307 / 4,579 / 4,278 | **breaks**: p95 4× over the limit |
+| failover, good balancer | 6,838 (57/s) | **0.11%** (8) | — | 3,156 / 522 / 3,152 | pass: the dead instance is hidden |
+| failover, bad balancer | 3,242 (27/s) | **27.5%** (891) | — | 1,080 / 190 / 1,081 | **fails**: a third of the traffic goes to the dead instance |
+
+**How to read them:**
+- **Stress:** the first component to saturate is the **gateway** (at its 0.5 CPU limit while the instances were at 15-50%). It is the single entry point, so it is also the first bottleneck. Adding instances does not help past that point; the gateway would need more CPU or its own replicas.
+- **Failover:** with the good balancer, Retry sends the request to the next instance at once, and the health check removes the dead one within 5 s. With the bad balancer, round robin keeps sending one request in three to the dead instance. Those requests fail, and throughput halves because clients wait on failed connections.
 
 ## How to Run
 
