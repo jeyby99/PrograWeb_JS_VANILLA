@@ -4,8 +4,9 @@
 #
 #   health-check.sh http://<host>:8080 [timeout-seconds]
 #
-# 1) waits until GET /api/entidades answers 200 (the app is up AND reaches PostgreSQL)
-# 2) checks that the pages /, /pagina1.html and /pagina2.html answer 200
+# 1) waits until GET /api/entidades answers 200 through the gateway (app up AND PostgreSQL)
+# 2) checks that the answer came through the API Gateway (X-Gateway header)
+# 3) checks that the pages /, /pagina1.html and /pagina2.html answer 200
 set -euo pipefail
 
 BASE_URL="${1:?usage: health-check.sh <base-url> [timeout-seconds]}"
@@ -26,6 +27,13 @@ done
 echo "OK  /api/entidades"
 
 failed=0
+if curl -s -D - -o /dev/null --max-time 5 "$BASE_URL/api/entidades" | grep -qi '^X-Gateway: prograweb-gateway'; then
+    echo "OK  X-Gateway header (request went through the API Gateway)"
+else
+    echo "::error title=Health check failed::$BASE_URL did not answer through the API Gateway (no X-Gateway header)"
+    failed=1
+fi
+
 for path in / /pagina1.html /pagina2.html; do
     code="$(status_of "$path")"
     if [ "$code" = "200" ]; then

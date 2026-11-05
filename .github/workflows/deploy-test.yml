@@ -10,7 +10,8 @@
 #   rollback -> only if the smoke tests fail: restore the previous image
 #
 # Uses SSH with the EC2 key pair instead of AWS credentials: Learner Lab keys
-# expire every ~4 hours. Configuration lives in the GitHub "test" environment:
+# expire every ~4 hours. First deploy: the 3 instances start in a chain, so the health
+# check waits up to 7 minutes. Configuration lives in the GitHub "test" environment:
 #   variables: EC2_HOST (Elastic IP), EC2_USER (default ec2-user),
 #              DB_USERNAME (default postgres), EC2_HOST_KEY (optional, pins the SSH host key)
 #   secrets:   EC2_SSH_KEY (contents of the .pem file), DB_PASSWORD
@@ -101,7 +102,7 @@ jobs:
             | ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh deploy $IMAGE_TAG"
 
       - name: Health check
-        run: deploy/health-check.sh "http://$EC2_HOST:8080" 120
+        run: deploy/health-check.sh "http://$EC2_HOST:8080" 420
 
       - name: Roll back (deployment unhealthy)
         if: failure() && steps.deploy.outcome == 'success'
@@ -109,7 +110,7 @@ jobs:
           echo "::error title=Deployment unhealthy::Rolling back to the previous image"
           # shellcheck disable=SC2029
           ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh rollback"
-          deploy/health-check.sh "http://$EC2_HOST:8080" 120
+          deploy/health-check.sh "http://$EC2_HOST:8080" 420
 
       - name: Summary
         if: always()
@@ -171,4 +172,4 @@ jobs:
           echo "::error title=Smoke tests failed::Rolling back to the previous image"
           # shellcheck disable=SC2029
           ssh ec2 "APP_DIR=$APP_DIR $APP_DIR/deploy.sh rollback"
-          deploy/health-check.sh "http://$EC2_HOST:8080" 120
+          deploy/health-check.sh "http://$EC2_HOST:8080" 420
