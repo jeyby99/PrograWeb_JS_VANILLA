@@ -1,10 +1,34 @@
-# Test environment on the AWS EC2 server (epic SCRUM-14).
-# Unlike the root docker-compose.yml, this file does not build anything:
-# it pulls the image published by GitHub Actions to GHCR.
+# Test environment on the AWS EC2 server (epic SCRUM-14), same layout as the root
+# docker-compose.yml but with the images published by GitHub Actions to GHCR:
+#   gateway  :8080        ghcr.io/jeyby99/prograweb-gateway:${IMAGE_TAG}
+#   app1..3  :8081-8083   ghcr.io/jeyby99/prograweb:${IMAGE_TAG}
+#   db                    PostgreSQL, not published
+# The Security Group decides what is reachable from the internet (22 and 8080 by default).
+# Sized for an EC2 t3.medium (2 vCPU, 4 GB).
 #
-# Usage on the server (in /opt/prograweb, next to a .env file):
+# Usage on the server (in /opt/prograweb, next to a .env file written by deploy.sh):
 #   docker compose -f docker-compose.test.yml pull
 #   docker compose -f docker-compose.test.yml up -d
+
+x-backend: &backend
+  image: ghcr.io/jeyby99/prograweb:${IMAGE_TAG:-test}
+  # Comes back on its own when the Learner Lab starts the instance again
+  restart: unless-stopped
+  environment: &backend-env
+    SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
+    SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+    SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    SPRING_JPA_SHOW_SQL: "false"
+    JAVA_TOOL_OPTIONS: -Xmx320m
+  mem_limit: 512m
+  cpus: 0.5
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$$SERVER_PORT/api/entidades || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 18
+    start_period: 40s
+
 services:
   db:
     image: postgres:16-alpine
@@ -13,26 +37,72 @@ services:
       POSTGRES_DB: PrograWeb
       POSTGRES_USER: ${DB_USERNAME:-postgres}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
-    # No "ports": the database is only reachable from the app container
+    # No "ports": the database is only reachable from the instances
     volumes:
       - pgdata:/var/lib/postgresql/data
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d PrograWeb"]
       interval: 5s
       timeout: 5s
       retries: 10
 
-  app:
-    image: ghcr.io/jeyby99/prograweb:${IMAGE_TAG:-test}
-    # Comes back on its own when the Learner Lab starts the instance again
-    restart: unless-stopped
+  app1:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8081
+      INSTANCE_NAME: app1
+    ports:
+      - "8081:8081"
     depends_on:
       db:
         condition: service_healthy
+
+  # Each instance waits for the previous one, so only one creates the tables
+  app2:
+    <<: *backend
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
-      SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
-      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+      <<: *backend-env
+      SERVER_PORT: 8082
+      INSTANCE_NAME: app2
+    ports:
+      - "8082:8082"
+    depends_on:
+      app1:
+        condition: service_healthy
+
+  app3:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8083
+      INSTANCE_NAME: app3
+    ports:
+      - "8083:8083"
+    depends_on:
+      app2:
+        condition: service_healthy
+
+  gateway:
+    image: ghcr.io/jeyby99/prograweb-gateway:${IMAGE_TAG:-test}
+    restart: unless-stopped
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+      app3:
+        condition: service_healthy
+    environment:
+      BACKEND_1_URL: http://app1:8081
+      BACKEND_2_URL: http://app2:8082
+      BACKEND_3_URL: http://app3:8083
+      # default = good balancer; bad-balancer only for the demo (deploy.sh balancer bad)
+      SPRING_PROFILES_ACTIVE: ${GATEWAY_PROFILE:-default}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    mem_limit: 512m
+    cpus: 0.5
     ports:
       - "8080:8080"
 
