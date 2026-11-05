@@ -5,29 +5,34 @@
 #   deploy.sh deploy <image-tag>   DB_USERNAME=/DB_PASSWORD= lines are read from stdin
 #   deploy.sh rollback             goes back to the tag that ran before the last deploy
 #   deploy.sh status               shows the running tag and the previous one
+#   deploy.sh balancer <good|bad>  switches the gateway profile (load-balancing demo, SCRUM-27)
 #
 # The database credentials arrive on stdin so they never appear in a command line.
 set -euo pipefail
 
 APP_DIR="${APP_DIR:-/opt/prograweb}"
 COMPOSE_FILE="docker-compose.test.yml"
-IMAGE="ghcr.io/jeyby99/prograweb"
+IMAGE="ghcr.io/jeyby99/prograweb (+ prograweb-gateway)"
 SAFE_VALUE='^[A-Za-z0-9._@%+=:-]+$'   # no spaces, quotes or "$" (they break the .env file)
 
 cd "$APP_DIR"
 
 compose() { docker compose -f "$COMPOSE_FILE" "$@"; }
 
+# SKIP_PULL=1 only for a local simulation with images built on the same machine
+pull_images() { [ "${SKIP_PULL:-0}" = 1 ] || compose pull --quiet app1 gateway; }
+
 # Value of KEY in .env, or empty
 env_value() {
     if [ -f .env ]; then sed -n "s/^$1=//p" .env | tail -n 1; fi
 }
 
-write_env() {   # write_env TAG USER PASSWORD
-    local tmp
+write_env() {   # write_env TAG USER PASSWORD [GATEWAY_PROFILE]; the profile is kept if not given
+    local tmp profile="${4:-$(env_value GATEWAY_PROFILE)}"
     tmp="$(mktemp .env.XXXXXX)"
     chmod 600 "$tmp"
-    printf 'IMAGE_TAG=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\n' "$1" "$2" "$3" > "$tmp"
+    printf 'IMAGE_TAG=%s\nDB_USERNAME=%s\nDB_PASSWORD=%s\nGATEWAY_PROFILE=%s\n' \
+        "$1" "$2" "$3" "${profile:-default}" > "$tmp"
     mv "$tmp" .env
 }
 
@@ -60,7 +65,8 @@ cmd_deploy() {
 
     write_env "$tag" "$user" "$pass"
     echo "Deploying $IMAGE:$tag (previous: ${current:-none})"
-    compose pull --quiet app
+    # app1..app3 share one image; the gateway has its own (same tag)
+    pull_images
     compose up -d --remove-orphans
     docker image prune -f > /dev/null
     compose ps
@@ -78,13 +84,27 @@ cmd_rollback() {
     cp -p .env .env.failed
     cp -p .env.previous .env
     echo "Rolling back $IMAGE:$current -> $IMAGE:$previous"
-    compose pull --quiet app
+    pull_images
     compose up -d --remove-orphans
     compose ps
 }
 
+cmd_balancer() {
+    local profile
+    case "${1:-}" in
+        good) profile=default ;;
+        bad)  profile=bad-balancer ;;
+        *) echo "usage: deploy.sh balancer <good|bad>" >&2; exit 2 ;;
+    esac
+    write_env "$(env_value IMAGE_TAG)" "$(env_value DB_USERNAME)" "$(env_value DB_PASSWORD)" "$profile"
+    # --no-deps: restart only the gateway, never a backend instance stopped for the demo
+    compose up -d --no-deps gateway
+    echo "Gateway profile: $profile"
+}
+
 cmd_status() {
     echo "IMAGE_TAG=$(env_value IMAGE_TAG)"
+    echo "GATEWAY_PROFILE=$(env_value GATEWAY_PROFILE)"
     echo "PREVIOUS_TAG=$(sed -n 's/^IMAGE_TAG=//p' .env.previous 2>/dev/null || true)"
     echo "FAILED_TAG=$(sed -n 's/^IMAGE_TAG=//p' .env.failed 2>/dev/null || true)"
     compose ps
@@ -94,5 +114,6 @@ case "${1:-}" in
     deploy) shift; cmd_deploy "$@" ;;
     rollback) cmd_rollback ;;
     status) cmd_status ;;
-    *) echo "usage: deploy.sh {deploy <image-tag>|rollback|status}" >&2; exit 2 ;;
+    balancer) shift; cmd_balancer "$@" ;;
+    *) echo "usage: deploy.sh {deploy <image-tag>|rollback|status|balancer <good|bad>}" >&2; exit 2 ;;
 esac
