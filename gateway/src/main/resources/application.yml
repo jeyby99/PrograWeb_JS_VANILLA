@@ -1,6 +1,7 @@
-# API Gateway routes + load balancer.
-# The backend runs as two instances (BACKEND_1_URL, BACKEND_2_URL): http://app1:8080 and
-# http://app2:8080 inside docker compose, http://localhost:8081 / :8082 when run by hand.
+# API Gateway routes + load balancer ("good balancer": health check + retry).
+# The backend runs as three instances (BACKEND_1_URL..BACKEND_3_URL): http://app1:8081,
+# http://app2:8082 and http://app3:8083 in docker compose, localhost:8081-8083 when run by hand.
+# The "bad-balancer" profile (application-bad-balancer.yml) turns the protections off for the demo.
 server:
   port: 8080
 
@@ -16,6 +17,7 @@ spring:
             prograweb-backend:
               - uri: ${BACKEND_1_URL:http://localhost:8081}
               - uri: ${BACKEND_2_URL:http://localhost:8082}
+              - uri: ${BACKEND_3_URL:http://localhost:8083}
     loadbalancer:
       # Round robin (default) over the instances that pass the health check
       configurations: health-check
@@ -27,6 +29,10 @@ spring:
     gateway:
       server:
         webflux:
+          # A backend that does not answer in time is a failure (504), not an endless wait
+          httpclient:
+            connect-timeout: 2000
+            response-timeout: 5s
           default-filters:
             # Marks every response that went through the gateway
             - AddResponseHeader=X-Gateway, prograweb-gateway

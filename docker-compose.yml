@@ -1,7 +1,11 @@
 # Starts PrograWeb + PostgreSQL behind the API Gateway:  docker compose up --build
-# Only the gateway is published (http://localhost:8080). It load balances (round robin)
-# over two backend instances, app1 and app2, reachable only inside this Docker network.
+#   gateway  -> http://localhost:8080  (load balances over the 3 instances)
+#   app1/2/3 -> http://localhost:8081, :8082, :8083  (direct access, for the load-balancing demo)
 # Credentials: .env file (see .env.example).
+# GATEWAY_PROFILE=bad-balancer switches the gateway to the badly configured balancer (demo only).
+#
+# Resource limits are fixed on purpose: load tests (loadtest/) are repeatable and the
+# breaking point is reachable on the test server (EC2 t3.medium: 2 vCPU, 4 GB).
 
 # Shared definition of a backend instance (YAML anchor)
 x-backend: &backend
@@ -11,14 +15,17 @@ x-backend: &backend
     SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
     SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
     SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:-1234}
-  # Healthy = the REST API answers (the app is up and reaches PostgreSQL)
+    SPRING_JPA_SHOW_SQL: "false"           # no SQL log per request under load
+    JAVA_TOOL_OPTIONS: -Xmx320m
+  mem_limit: 512m
+  cpus: 0.5
+  # Healthy = the REST API answers on the instance's own port (app up and PostgreSQL reachable)
   healthcheck:
-    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/api/entidades || exit 1"]
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$$SERVER_PORT/api/entidades || exit 1"]
     interval: 10s
     timeout: 5s
     retries: 12
-    start_period: 20s
-  # No "ports": every request goes through the gateway
+    start_period: 30s
 
 services:
   db:
@@ -31,6 +38,7 @@ services:
       - "5433:5432"   # host port 5433 to avoid clashing with a local PostgreSQL
     volumes:
       - pgdata:/var/lib/postgresql/data
+    mem_limit: 512m
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d PrograWeb"]
       interval: 5s
@@ -41,19 +49,37 @@ services:
     <<: *backend
     environment:
       <<: *backend-env
+      SERVER_PORT: 8081
       INSTANCE_NAME: app1
+    ports:
+      - "8081:8081"
     depends_on:
       db:
         condition: service_healthy
 
+  # Each instance waits for the previous one, so only one creates the tables (ddl-auto=update)
   app2:
     <<: *backend
     environment:
       <<: *backend-env
+      SERVER_PORT: 8082
       INSTANCE_NAME: app2
-    # Starts after app1 is healthy, so only one instance creates the tables (ddl-auto=update)
+    ports:
+      - "8082:8082"
     depends_on:
       app1:
+        condition: service_healthy
+
+  app3:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8083
+      INSTANCE_NAME: app3
+    ports:
+      - "8083:8083"
+    depends_on:
+      app2:
         condition: service_healthy
 
   gateway:
@@ -64,9 +90,16 @@ services:
         condition: service_healthy
       app2:
         condition: service_healthy
+      app3:
+        condition: service_healthy
     environment:
-      BACKEND_1_URL: http://app1:8080
-      BACKEND_2_URL: http://app2:8080
+      BACKEND_1_URL: http://app1:8081
+      BACKEND_2_URL: http://app2:8082
+      BACKEND_3_URL: http://app3:8083
+      SPRING_PROFILES_ACTIVE: ${GATEWAY_PROFILE:-default}
+      JAVA_TOOL_OPTIONS: -Xmx256m
+    mem_limit: 512m
+    cpus: 0.5
     ports:
       - "8080:8080"
 
