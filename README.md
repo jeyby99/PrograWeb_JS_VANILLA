@@ -151,6 +151,20 @@ Each instance starts after the previous one is healthy (`app1` → `app2` → `a
 
 **Why:** with one backend, a crash takes the whole app down. With three behind the balancer the app keeps answering when one fails, and more instances can be added for more load. Only `POST` is not retried: repeating it could create a record twice.
 
+**Good vs bad balancer (demo):** the gateway profile `bad-balancer` (`gateway/src/main/resources/application-bad-balancer.yml`) keeps the same 3 instances, round robin and timeouts, but turns the protections off, to show why they matter. Every response carries `X-Balancer: good` or `X-Balancer: bad`.
+
+| | Good balancer (default) | Bad balancer (`GATEWAY_PROFILE=bad-balancer`) |
+|---|---|---|
+| Health check | Every 5 s; a dead instance leaves the rotation | Off: a dead instance keeps receiving traffic |
+| Retry | GET retried once on the next instance | Off: the client receives the error |
+| One instance down | ~0% errors (measured: 12/12 OK) | ~1 of every 3 requests fails with 5xx (measured: 4/12 → 500) |
+
+```bash
+# --no-deps: switch only the gateway, without starting a stopped instance again
+GATEWAY_PROFILE=bad-balancer docker compose up -d --no-deps gateway   # bad balancer
+docker compose up -d --no-deps gateway                                 # back to the good one
+```
+
 **Try it:**
 
 ```bash
