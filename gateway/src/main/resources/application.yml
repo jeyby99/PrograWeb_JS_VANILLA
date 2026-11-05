@@ -36,6 +36,8 @@ spring:
           default-filters:
             # Marks every response that went through the gateway
             - AddResponseHeader=X-Gateway, prograweb-gateway
+            # Which balancer configuration answered: "good" (this file) or "bad" (bad-balancer profile)
+            - AddResponseHeader=X-Balancer, ${prograweb.balancer-mode:good}
             # The backend also sends CORS headers; keep a single copy (browsers reject duplicates)
             - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_FIRST
           globalcors:
