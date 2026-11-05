@@ -18,13 +18,14 @@ import reactor.core.publisher.Mono;
 import reactor.netty.DisposableServer;
 import reactor.netty.http.server.HttpServer;
 
-// Starts two fake backend instances ("b1", "b2") and checks routing and load balancing.
+// Starts three fake backend instances ("b1", "b2", "b3") and checks routing and load balancing.
 // Each one answers "<instance>|<path>|<X-Request-Id it received>", or the Host header on /echo-host.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class GatewayRoutingTests {
 
     private static DisposableServer backend1;
     private static DisposableServer backend2;
+    private static DisposableServer backend3;
 
     @Autowired
     private WebTestClient client;
@@ -44,18 +45,21 @@ class GatewayRoutingTests {
     static void startBackends() {
         backend1 = fakeBackend("b1");
         backend2 = fakeBackend("b2");
+        backend3 = fakeBackend("b3");
     }
 
     @AfterAll
     static void stopBackends() {
         backend1.disposeNow();
         backend2.disposeNow();
+        backend3.disposeNow();
     }
 
     @DynamicPropertySource
     static void backendUrls(DynamicPropertyRegistry registry) {
         registry.add("BACKEND_1_URL", () -> "http://localhost:" + backend1.port());
         registry.add("BACKEND_2_URL", () -> "http://localhost:" + backend2.port());
+        registry.add("BACKEND_3_URL", () -> "http://localhost:" + backend3.port());
         // Plain round robin in tests: the periodic health check is covered by the docker compose test
         registry.add("spring.cloud.loadbalancer.configurations", () -> "default");
     }
@@ -79,19 +83,17 @@ class GatewayRoutingTests {
     }
 
     @Test
-    void requestsAreSpreadOverBothInstances() {
+    void requestsAreSpreadOverTheThreeInstances() {
         List<String> instances = new ArrayList<>();
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 6; i++) {
             client.get().uri("/api/entidades").exchange()
                     .expectStatus().isOk()
                     .expectBody(String.class)
                     .value(body -> instances.add(body.substring(0, 2)));
         }
-        // Round robin: two consecutive requests never hit the same instance
-        assertThat(instances).containsOnly("b1", "b2");
-        for (int i = 1; i < instances.size(); i++) {
-            assertThat(instances.get(i)).isNotEqualTo(instances.get(i - 1));
-        }
+        // Round robin: every 3 consecutive requests hit the 3 instances once each
+        assertThat(instances.subList(0, 3)).containsExactlyInAnyOrder("b1", "b2", "b3");
+        assertThat(instances.subList(3, 6)).containsExactlyElementsOf(instances.subList(0, 3));
     }
 
     @Test
