@@ -359,6 +359,35 @@ BASE_URL=http://<elastic-ip>:8080 loadtest/run.sh load   # against the EC2 test 
 - **Stress:** the first component to saturate is the **gateway** (at its 0.5 CPU limit while the instances were at 15-50%). It is the single entry point, so it is also the first bottleneck. Adding instances does not help past that point; the gateway would need more CPU or its own replicas.
 - **Failover:** with the good balancer, Retry sends the request to the next instance at once, and the health check removes the dead one within 5 s. With the bad balancer, round robin keeps sending one request in three to the dead instance. Those requests fail, and throughput halves because clients wait on failed connections.
 
+
+### AWS test server: EC2 t3.micro (1 GB)
+
+The AWS Academy student account only allows a **t3.micro (2 vCPU, 1 GB RAM)**, so `deploy/docker-compose.test.yml` keeps the same layout (gateway :8080, app1-app3 :8081-8083, PostgreSQL) with a small memory footprint:
+
+| Container | `mem_limit` | JVM / settings | Used at rest | Used under stress |
+|---|---|---|---|---|
+| gateway | 200 MB | `-Xmx80m`, metaspace 80 MB, direct memory 32 MB | 130 MB | 176 MB |
+| app1, app2, app3 (each) | 230 MB | `-Xmx112m`, metaspace 96 MB, Hikari pool 5, 40 Tomcat threads | ~150 MB | ~166 MB |
+| db (PostgreSQL) | 96 MB | `shared_buffers=16MB`, `max_connections=30` | 72 MB | 72 MB |
+
+All JVMs use Serial GC, the C1 compiler only and `-XX:+ExitOnOutOfMemoryError`, so Docker restarts a container instead of leaving it half alive. The server gets **2 GB of swap** for start-up peaks. The instances start one after another (about 100 s on the simulation, longer on the real server), and the deploy health check waits up to 15 minutes.
+
+**One-time server preparation** (SSH or EC2 Instance Connect). It installs Docker and the Compose plugin, adds the swap and creates `/opt/prograweb`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jeyby99/PrograWeb_JS_VANILLA/dev/deploy/server-setup.sh | sudo bash
+```
+
+**Results with the t3.micro limits** (local simulation with the same compose file and limits):
+
+| Test | Requests | Errors | p95 | app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 30 | 0% | 33 ms | 9 / 12 / 9 | pass |
+| load (30 users) | 4,801 | 0% | 30 ms | 1,598 / 1,599 / 1,604 | pass |
+| stress (up to 600 users) | 19,317 | **17.8%** | **4.9 s** | 5,074 / 5,414 / 5,383 | **breaks**, then recovers (API 200 right after, no container restarted) |
+| failover, good balancer | 7,471 | **0.06%** | — | 3,422 / 626 / 3,418 | pass |
+| failover, bad balancer | 4,399 | **23.7%** | — | 1,466 / 424 / 1,467 | **fails** |
+
 ## How to Run
 
 **Requirements:** JDK 17, Maven and PostgreSQL. Node.js 18+ only if you want to run the tests.
