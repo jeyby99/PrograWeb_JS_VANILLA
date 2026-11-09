@@ -20,6 +20,8 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 11. [How to Run](#how-to-run)
 12. [Run with Docker](#run-with-docker)
 13. [CI/CD](#cicd)
+    - [Deployment to AWS (test)](#deployment-to-aws-test)
+    - [Learner Lab runbook](#learner-lab-runbook)
 14. [Development Workflow](#development-workflow)
 15. [Author](#author)
 
@@ -332,6 +334,7 @@ The load balancer is tested with [k6](https://k6.io) (`loadtest/`). k6 runs in D
 | `smoke.js` | 1 user, 30 s | Everything answers before heavier tests | 0 errors, p95 < 1 s |
 | `load.js` | ramp to 30 users, hold 1 min | Normal expected load | errors < 1%, p95 < 800 ms |
 | `stress.js` | 50 → 100 → 200 → 400 → 600 users, no pauses | **Breaking point**: where latency explodes and requests fail. Expected to fail | marks errors > 5% / p95 > 2 s as broken |
+| `breakpoint.js` | 600 → 1,000 → 1,500 → 2,000 users, no pauses | Breaking point of the real EC2 t3.micro, which survives `stress.js`. Expected to fail | same as stress |
 | `failover.js` | 20 users, 2 min; one instance stopped at ~0:30 and started at ~1:30 | Good vs bad balancer when an instance dies | errors < 1% |
 
 Every script counts responses per instance (`X-Served-By`) in the `served_by` metric; `instance:none` = error responses that never reached an instance.
@@ -340,6 +343,7 @@ Every script counts responses per instance (`X-Served-By`) in the `served_by` me
 loadtest/run.sh smoke                                    # local docker compose (gateway on :8080)
 loadtest/run.sh load
 loadtest/run.sh stress
+loadtest/run.sh breakpoint                               # heavier: for the EC2 server
 loadtest/failover-demo.sh good                           # local: stops/starts app2 automatically
 loadtest/failover-demo.sh bad                            # same with GATEWAY_PROFILE=bad-balancer
 BASE_URL=http://<elastic-ip>:8080 loadtest/run.sh load   # against the EC2 test server
@@ -387,6 +391,21 @@ curl -fsSL https://raw.githubusercontent.com/jeyby99/PrograWeb_JS_VANILLA/dev/de
 | stress (up to 600 users) | 19,317 | **17.8%** | **4.9 s** | 5,074 / 5,414 / 5,383 | **breaks**, then recovers (API 200 right after, no container restarted) |
 | failover, good balancer | 7,471 | **0.06%** | — | 3,422 / 626 / 3,418 | pass |
 | failover, bad balancer | 4,399 | **23.7%** | — | 1,466 / 424 / 1,467 | **fails** |
+
+**Results on the real EC2 t3.micro** (32.199.131.132, k6 from a home PC, ~85 ms network latency included):
+
+| Test | Requests | Errors | p95 | app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 28 | 0% | 95 ms | 11 / 8 / 9 | pass |
+| load (30 users) | 4,189 (40/s) | 0% | 111 ms | 1,398 / 1,395 / 1,396 | pass |
+| stress (up to 600 users) | 70,438 (391/s) | 0% | 1.51 s | 23,464 / 23,612 / 23,362 | **survives**, 14× slower |
+| breakpoint (up to 2,000 users) | 54,824 (365/s) | 0.64% timeouts (first run: thousands) | **6.88 s** | 17,677 / 19,074 / 17,722 | **breaks** between 1,000 and 2,000 users; recovers right after |
+| failover, good balancer (app2 stopped ~1 min) | 5,102 (42/s) | **0.05%** (3) | — | 2,241 / 612 / 2,246 | pass: the failure is hidden |
+| failover, bad balancer (app2 stopped ~1 min) | 3,698 (31/s) | **16.9%** (625) | — | 1,233 / 607 / 1,233 | **fails**: ~1 in 3 requests while app2 is down |
+
+On Linux the real server handles more than the Docker Desktop simulation, so `stress.js` only slows it down; `breakpoint.js` finds where it really fails. The throughput tops out at ~390 requests/s.
+
+How the failover runs were done on the server: `deploy.sh balancer good|bad` to choose the balancer (checked from outside with the `X-Balancer` header), then `docker compose -f docker-compose.test.yml stop app2` ~45 s into the 2-minute k6 run and `start app2` 60 s later.
 
 ## How to Run
 
@@ -457,9 +476,74 @@ GitHub Actions workflows live in `.github/workflows/`:
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | Push or PR to `dev`, `test`, `main` | Maven build (Java 17), Playwright e2e tests (in the official Playwright container) and a Docker image build without pushing |
-| `docker-publish.yml` | Push to `main` (or manual run) | Builds and pushes `ghcr.io/jeyby99/prograweb` with tags `latest` and `sha-<commit>` |
+| `docker-publish.yml` | Push to `main` or `test` (or manual run) | Builds and pushes `ghcr.io/jeyby99/prograweb` and `ghcr.io/jeyby99/prograweb-gateway`. `main` → `latest` + `sha-<commit>`; `test` → `test` + `test-sha-<commit>`, then calls `deploy-test.yml` |
+| `deploy-test.yml` | Called after a `test` image is published, or manual run | Deploys that exact image to the AWS EC2 test server: health check, Playwright smoke tests against the server, automatic rollback |
 
 On CI, Playwright retries a failed test up to 2 times because some tests depend on timing (debounce and chained requests). Locally there are no retries.
+
+### Deployment to AWS (test)
+
+**Test server:** http://32.199.131.132:8080 (EC2 t3.micro in the AWS Academy Learner Lab, Elastic IP). It only answers while the lab is running.
+
+```
+PR to dev/test/main ──► ci.yml (build + e2e + Docker build) ──► merge into test
+        │
+        ▼
+docker-publish.yml ── pushes prograweb + prograweb-gateway :test-sha-<commit> to GHCR
+        │
+        ▼
+deploy-test.yml
+  deploy   : SSH to EC2 → copy compose + scripts → deploy.sh deploy <tag> → health-check.sh (≤ 15 min)
+             unhealthy → deploy.sh rollback, workflow fails
+  smoke    : Playwright suite against http://<EC2_HOST>:8080
+  rollback : only if the smoke tests fail → previous image back, workflow fails
+```
+
+- The workflow deploys the **exact tag** of the build (`test-sha-<commit>`), never "whatever `test` points to later".
+- It connects over **SSH** with a deploy key, not with AWS credentials (Learner Lab keys expire every ~4 hours). If port 22 does not answer, it fails at once with *"Start the AWS Academy Learner Lab"*.
+- Configuration lives in the GitHub environment **`test`**: variables `EC2_HOST`, `EC2_USER` (and optional `DB_USERNAME`, `EC2_HOST_KEY`), secrets `EC2_SSH_KEY`, `DB_PASSWORD`. Nothing secret is in the repository; the DB credentials reach the server on stdin and are stored in `/opt/prograweb/.env` (mode 600).
+- The job summary shows the deployed tag and the server URL. When the smoke tests fail, the Playwright report is uploaded as an artifact (kept 7 days).
+- Only one deployment runs at a time.
+
+**Manual redeploy** (for example after the lab was off during a merge): GitHub → **Actions** → **Deploy to test (AWS EC2)** → **Run workflow** → branch `test`, image tag `test` (latest test build) or a specific `test-sha-<commit>`. With the GitHub CLI:
+
+```bash
+gh workflow run deploy-test.yml --ref test -f image-tag=test
+```
+
+Re-running a failed run ("Re-run failed jobs") does the same for that run's tag.
+
+**On the server** (`ssh ec2-user@32.199.131.132`, then `cd /opt/prograweb`):
+
+| Command | What it does |
+|---|---|
+| `bash deploy.sh status` | Running tag, previous tag, gateway profile and container states |
+| `bash deploy.sh rollback` | Goes back to the configuration that ran before the last deploy |
+| `bash deploy.sh balancer good` / `bad` | Switches the gateway between the good and the bad balancer (restarts only the gateway) |
+| `docker compose -f docker-compose.test.yml logs --tail 100 app1` | Logs of one container (`app1`, `app2`, `app3`, `gateway`, `db`) |
+| `free -h` | RAM and swap use |
+
+### Learner Lab runbook
+
+1. **Start the lab** in AWS Academy (Start Lab) and wait until the dot next to "AWS" turns **green** (a few minutes).
+2. **Check the instance** in the EC2 console: state *Running*, Elastic IP `32.199.131.132` (it keeps the same address after every restart). The lab starts the instance again by itself; the containers come back on their own (`restart: unless-stopped`) a few minutes later.
+3. **Check the app:** http://32.199.131.132:8080 (the instances start one after another; allow ~5 minutes after the instance starts).
+4. **If a deployment failed because the lab was off**, run the manual redeploy above (or re-run the failed run).
+5. **End Lab when finished.** Sessions last 4 hours at most; when one ends, AWS stops the instance (data in the database volume is kept).
+
+**Cost notes:** while the lab runs, the t3.micro, the public IPv4 address of the Elastic IP and the 20 GB EBS volume each cost cents per day; outside lab sessions only the EBS volume and the address keep a small cost. That stays well under the USD 50 Learner Lab budget as long as the lab is not left running for days. Check the remaining budget on the Learner Lab page.
+
+**Troubleshooting**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Deploy fails at *"Set up SSH"* (port 22 not reachable) / SSH timeout | Lab off, or the Security Group lost the port 22 rule | Start the lab; check the inbound rule for 22 |
+| `curl` to :8080 times out from your PC (exit 28) while SSH works | Security Group has no rule for 8080 | Add an inbound rule TCP 8080 |
+| Connection refused on :8080 (exit 7) | Gateway not started yet, or stopped | `bash deploy.sh status`; wait for the instances or check `logs gateway` |
+| Image pull *denied* / *unauthorized* | A GHCR package was made private | Make `prograweb` and `prograweb-gateway` public again, or `docker login ghcr.io` on the server with a `read:packages` token |
+| Health check times out | Instances start slowly or keep restarting (out of memory) | `bash deploy.sh status`, `logs app1`, `free -h` (swap must show 2 GB); the deploy has already rolled back |
+| Smoke tests fail, previous version back | A real bug in that build | Open the Playwright report artifact of the run, fix, merge again |
+| `X-Balancer: bad` after the demo | The bad balancer was left on | `bash deploy.sh balancer good` |
 
 ## Development Workflow
 
@@ -473,13 +557,13 @@ Jira ticket (SCRUM-X) ──► feature/SCRUM-X-short-name ──PR──► dev
 2. **Branch.** Create `feature/SCRUM-X-short-name` from `dev`.
 3. **Commits.** Every commit message starts with the ticket key, for example `SCRUM-8: Add docker-compose with PostgreSQL`.
 4. **Pull requests.** Open a PR to `dev` with the Jira link, what changed, why, and how it was tested. CI must pass, and the PR gets a review comment before it is merged.
-5. **Promotion.** `dev` → `test` (testing) → `main` (release) through PRs. Merging into `main` publishes the Docker image.
+5. **Promotion.** `dev` → `test` (testing) → `main` (release) through PRs. Merging into `test` publishes the `test` images and deploys them to the AWS test server; merging into `main` publishes the release images.
 6. **Language.** All documentation, code comments, commits, PRs and Jira tickets are written in English.
 
 | Branch | Purpose |
 |---|---|
 | `main` | Stable version; every update publishes the Docker image |
-| `test` | Integration and testing before release |
+| `test` | Integration and testing before release; every update is deployed to the AWS test server |
 | `dev` | Development; feature branches are merged here |
 | `feature/SCRUM-X-*` | One branch per Jira ticket |
 
