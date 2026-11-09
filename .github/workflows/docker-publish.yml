@@ -1,11 +1,14 @@
-# Publishes the images to GitHub Container Registry every time main is updated:
+# Publishes the images to GitHub Container Registry:
 #   ghcr.io/jeyby99/prograweb          (backend)
-#   ghcr.io/jeyby99/prograweb-gateway  (API Gateway)
+#   ghcr.io/jeyby99/prograweb-gateway  (API Gateway + load balancer)
+# with these tags:
+#   main -> latest + sha-<commit>        (release images)
+#   test -> test   + test-sha-<commit>   (images deployed to the AWS test server)
 name: Publish Docker image
 
 on:
   push:
-    branches: [main]
+    branches: [main, test]
   workflow_dispatch:
 
 permissions:
@@ -18,7 +21,13 @@ env:
 
 jobs:
   publish:
+    # Only these two branches have images; a manual run from another branch does nothing
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/test'
     runs-on: ubuntu-latest
+    outputs:
+      # Exact, immutable tag of this build (sha-<commit> or test-sha-<commit>),
+      # so a deployment never picks up a later push to the same branch
+      image-tag: ${{ steps.tag.outputs.image-tag }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -34,8 +43,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test,enable=${{ github.ref == 'refs/heads/test' }}
+            type=sha,prefix=test-sha-,enable=${{ github.ref == 'refs/heads/test' }}
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -51,8 +62,10 @@ jobs:
         with:
           images: ${{ env.GATEWAY_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
-            type=sha
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=test,enable=${{ github.ref == 'refs/heads/test' }}
+            type=sha,prefix=test-sha-,enable=${{ github.ref == 'refs/heads/test' }}
       - name: Build and push the gateway
         uses: docker/build-push-action@v6
         with:
@@ -62,3 +75,28 @@ jobs:
           labels: ${{ steps.gateway-meta.outputs.labels }}
           cache-from: type=gha,scope=gateway
           cache-to: type=gha,mode=max,scope=gateway
+      - name: Immutable tag of this build
+        id: tag
+        env:
+          PREFIX: ${{ github.ref == 'refs/heads/test' && 'test-sha-' || 'sha-' }}
+        run: |
+          TAG="${PREFIX}${GITHUB_SHA::7}"
+          echo "image-tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Published images"
+            echo
+            echo '```'
+            echo "${{ steps.meta.outputs.tags }}"
+            echo "${{ steps.gateway-meta.outputs.tags }}"
+            echo '```'
+            echo "Immutable tag: \`$TAG\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # test branch only: deploy the image that was just published to the AWS test server
+  deploy-test:
+    needs: publish
+    if: github.ref == 'refs/heads/test'
+    uses: ./.github/workflows/deploy-test.yml
+    with:
+      image-tag: ${{ needs.publish.outputs.image-tag }}
+    secrets: inherit

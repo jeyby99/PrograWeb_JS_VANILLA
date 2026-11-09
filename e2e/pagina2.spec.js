@@ -573,7 +573,9 @@ test.describe('Page 2 - Rick and Morty', () => {
     s.calls.length = 0;
     await input(page).fill('temporada 1'); // S01E01..S01E04 -> 7 different characters
     await input(page).press('Enter');
-    await expect(status(page)).toContainText('"temporada 1"');
+    // Wait for the final status: "Buscando \"temporada 1\"..." also contains the query, and the
+    // previous "rick" search also showed "Página 1 de 2", so neither proves the search ended
+    await expect(status(page)).toContainText('resultado(s) para "temporada 1"');
     await expect(pageInfo(page)).toHaveText('Página 1 de 2');
     expect(s.calls.map((c) => c.kind)).toEqual(['episodeFilter', 'characterBatch', 'location']);
     await expect(cards(page)).toHaveCount(6);

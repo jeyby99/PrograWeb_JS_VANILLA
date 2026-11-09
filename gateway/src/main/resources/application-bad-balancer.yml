@@ -1,0 +1,40 @@
+# "Bad balancer" profile (SCRUM-27). FOR THE LOAD-TEST DEMO ONLY: it shows what happens when
+# the load balancer has no protections. Activate with GATEWAY_PROFILE=bad-balancer.
+#
+#                  good (application.yml)            bad (this file)
+#   health check   every 5 s, dead instance removed  OFF: a dead instance keeps getting traffic
+#   retry          GET retried on the next instance  OFF: the client receives the error
+#
+# Same 3 instances, same round robin, same timeouts: only the protections change.
+prograweb:
+  balancer-mode: bad
+
+spring:
+  cloud:
+    loadbalancer:
+      # Plain round robin over the static list, no health check
+      configurations: default
+    gateway:
+      server:
+        webflux:
+          # Lists are replaced, not merged, by a profile: the routes are repeated without Retry
+          routes:
+            - id: backend-api
+              uri: lb://prograweb-backend
+              predicates:
+                - Path=/api/**
+              filters:
+                - PreserveHostHeader
+            - id: rick-and-morty
+              uri: https://rickandmortyapi.com
+              predicates:
+                - Path=/rickandmorty/**
+              filters:
+                - RewritePath=/rickandmorty/?(?<segment>.*), /api/$\{segment}
+            - id: backend-web
+              uri: lb://prograweb-backend
+              order: 1000
+              predicates:
+                - Path=/**
+              filters:
+                - PreserveHostHeader

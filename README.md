@@ -16,6 +16,7 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 8. [Project Structure](#project-structure)
 9. [Features](#features)
 10. [Testing with Playwright](#testing-with-playwright)
+    - [Load testing with k6](#load-testing-with-k6)
 11. [How to Run](#how-to-run)
 12. [Run with Docker](#run-with-docker)
 13. [CI/CD](#cicd)
@@ -70,8 +71,8 @@ Build a full-stack web application that connects a Spring Boot REST backend to a
 - **External API:** [Rick and Morty API](https://rickandmortyapi.com) (3 endpoints: `character`, `location`, `episode`)
 - **Testing:** Playwright (`@playwright/test`) on Node.js
 - **API Gateway:** Spring Cloud Gateway 2025.0 (Spring WebFlux, Netty), Spring Boot Actuator
-- **Load balancing:** Spring Cloud LoadBalancer (round robin + health check) over two backend instances
-- **Containers:** Docker (multi-stage images), Docker Compose (gateway + 2 backend instances + PostgreSQL)
+- **Load balancing:** Spring Cloud LoadBalancer (round robin + health check) over three backend instances
+- **Containers:** Docker (multi-stage images), Docker Compose (gateway + 3 backend instances + PostgreSQL)
 - **CI/CD:** GitHub Actions, GitHub Container Registry (GHCR)
 - **Project management:** Jira (project `SCRUM`)
 
@@ -105,13 +106,12 @@ The project follows a **client-server architecture** with a **layered architectu
 
 ### API Gateway
 
-**What:** a separate Spring Boot service (`gateway/`, Spring Cloud Gateway) that is the **single entry point** of the application. It is the only container published on port 8080; the backend is reachable only inside the Docker network.
+**What:** a separate Spring Boot service (`gateway/`, Spring Cloud Gateway) that is the **single entry point** of the application, on port **8080**. The three backend instances also answer directly on **8081, 8082 and 8083** (required for the load-balancing demo); on AWS only 8080 is open to the internet by default.
 
 ```
-                                                          ┌──► Backend app1 ──┐
-Browser ──:8080──► API Gateway ──(/api/**, /, pages)── LB ─┤                   ├──► PostgreSQL
-                        │                                  └──► Backend app2 ──┘
-                        │                               (Docker network only)
+                                                          ┌──► app1 :8081 ──┐
+Browser ──:8080──► API Gateway ──(/api/**, /, pages)── LB ─┼──► app2 :8082 ──┼──► PostgreSQL
+                        │                                  └──► app3 :8083 ──┘
                         └──(/rickandmorty/**)──► https://rickandmortyapi.com/api/**
 
 Every request gets an X-Request-Id and one log line (method, path, status, time).
@@ -121,9 +121,9 @@ Every request gets an X-Request-Id and one log line (method, path, status, time)
 
 | Route id | Path | Destination | Filters |
 |---|---|---|---|
-| `backend-api` | `/api/**` | `lb://prograweb-backend` (app1, app2) | `PreserveHostHeader`, `Retry` (GET) |
+| `backend-api` | `/api/**` | `lb://prograweb-backend` (app1, app2, app3) | `PreserveHostHeader`, `Retry` (GET) |
 | `rick-and-morty` | `/rickandmorty/**` | `https://rickandmortyapi.com/api/**` | `RewritePath` |
-| `backend-web` | everything else (order 1000, last) | `lb://prograweb-backend` (app1, app2) | `PreserveHostHeader`, `Retry` (GET) |
+| `backend-web` | everything else (order 1000, last) | `lb://prograweb-backend` (app1, app2, app3) | `PreserveHostHeader`, `Retry` (GET) |
 
 **Cross-cutting concerns handled in one place:**
 - `RequestLoggingFilter` (global filter): assigns an `X-Request-Id` (keeps a valid one sent by the client), forwards it to the backend, returns it in the response and logs `GET /api/entidades -> 200 OK in 20 ms [id]`.
@@ -135,25 +135,43 @@ Every request gets an X-Request-Id and one log line (method, path, status, time)
 
 ### Load Balancer
 
-**What:** the gateway spreads the backend traffic over **two instances** (`app1`, `app2`: same image, same PostgreSQL) with **Spring Cloud LoadBalancer**. Routes use `lb://prograweb-backend` instead of a fixed URL.
+**What:** the gateway spreads the backend traffic over **three instances** (`app1` :8081, `app2` :8082, `app3` :8083: same image, same PostgreSQL) with **Spring Cloud LoadBalancer**. Routes use `lb://prograweb-backend` instead of a fixed URL.
 
 | Piece | Configuration | Effect |
 |---|---|---|
-| Instance list | `spring.cloud.discovery.client.simple.instances.prograweb-backend` = `BACKEND_1_URL`, `BACKEND_2_URL` | Static list, no service registry needed |
-| Algorithm | Round robin (default) | Consecutive requests alternate app1 → app2 → app1 |
+| Instance list | `spring.cloud.discovery.client.simple.instances.prograweb-backend` = `BACKEND_1_URL`, `BACKEND_2_URL`, `BACKEND_3_URL` | Static list, no service registry needed |
+| Algorithm | Round robin (default) | Each instance gets about a third of the requests. The exact order can shift when the health check refreshes the list every 5 s (60 requests: 18 / 21 / 21) |
 | Health check | `spring.cloud.loadbalancer.configurations: health-check`, every 5 s on `/api/entidades` | A failing instance leaves the rotation and comes back when it recovers |
-| Retry | `Retry` filter, 1 retry, GET only, on 5xx or connection errors | A request that hits a dead instance is retried on the other one, so the user sees no error |
+| Retry | `Retry` filter, 1 retry, GET only, on 5xx or connection errors | A request that hits a dead instance is retried on the next one, so the user sees no error |
+| Timeouts | `httpclient.connect-timeout: 2000`, `response-timeout: 5s` | A backend that does not answer in time becomes a 504 instead of an endless wait |
 | `X-Served-By` | `ServedByFilter` in the backend (`INSTANCE_NAME`) | Shows which instance answered |
 
-`app2` starts after `app1` is healthy, so only one instance creates the tables (`ddl-auto=update`). Both share the database, so data written through one instance is read through the other.
+Each instance starts after the previous one is healthy (`app1` → `app2` → `app3`), so only one creates the tables (`ddl-auto=update`). All share the database, so data written through one instance is read through the others.
 
-**Why:** with one backend, a crash takes the whole app down. With two behind the balancer the app keeps answering, and more instances can be added for more load. Only `POST` is not retried: repeating it could create a record twice.
+**Resource limits** (fixed on purpose so load tests are repeatable and fit an EC2 t3.medium, 2 vCPU / 4 GB): each instance and the gateway have `mem_limit: 512m` and `cpus: 0.5`; the JVM heap is set with `JAVA_TOOL_OPTIONS` (320 MB backend, 256 MB gateway); PostgreSQL `mem_limit: 512m`. SQL logging is off in containers (`SPRING_JPA_SHOW_SQL=false`).
+
+**Why:** with one backend, a crash takes the whole app down. With three behind the balancer the app keeps answering when one fails, and more instances can be added for more load. Only `POST` is not retried: repeating it could create a record twice.
+
+**Good vs bad balancer (demo):** the gateway profile `bad-balancer` (`gateway/src/main/resources/application-bad-balancer.yml`) keeps the same 3 instances, round robin and timeouts, but turns the protections off, to show why they matter. Every response carries `X-Balancer: good` or `X-Balancer: bad`.
+
+| | Good balancer (default) | Bad balancer (`GATEWAY_PROFILE=bad-balancer`) |
+|---|---|---|
+| Health check | Every 5 s; a dead instance leaves the rotation | Off: a dead instance keeps receiving traffic |
+| Retry | GET retried once on the next instance | Off: the client receives the error |
+| One instance down | ~0% errors (measured: 12/12 OK) | ~1 of every 3 requests fails with 5xx (measured: 4/12 → 500) |
+
+```bash
+# --no-deps: switch only the gateway, without starting a stopped instance again
+GATEWAY_PROFILE=bad-balancer docker compose up -d --no-deps gateway   # bad balancer
+docker compose up -d --no-deps gateway                                 # back to the good one
+```
 
 **Try it:**
 
 ```bash
-for i in 1 2 3 4; do curl -s -D - -o /dev/null http://localhost:8080/api/entidades | grep X-Served-By; done
-docker compose stop app2      # requests keep answering 200 from app1
+for i in 1 2 3 4 5 6; do curl -s -D - -o /dev/null http://localhost:8080/api/entidades | grep X-Served-By; done
+curl -s -D - -o /dev/null http://localhost:8082/api/entidades | grep X-Served-By   # one instance directly
+docker compose stop app2      # requests keep answering 200 from app1 and app3
 docker compose start app2     # app2 joins the rotation again
 ```
 
@@ -305,6 +323,71 @@ set BASE_URL=http://localhost:8080 && npm test
 $env:BASE_URL="http://localhost:8080"; npm test
 ```
 
+### Load testing with k6
+
+The load balancer is tested with [k6](https://k6.io) (`loadtest/`). k6 runs in Docker, so nothing needs to be installed; reports (HTML dashboard + JSON summary) are written to `loadtest/reports/` (ignored by git).
+
+| Script | Load | What it shows | Pass criteria |
+|---|---|---|---|
+| `smoke.js` | 1 user, 30 s | Everything answers before heavier tests | 0 errors, p95 < 1 s |
+| `load.js` | ramp to 30 users, hold 1 min | Normal expected load | errors < 1%, p95 < 800 ms |
+| `stress.js` | 50 → 100 → 200 → 400 → 600 users, no pauses | **Breaking point**: where latency explodes and requests fail. Expected to fail | marks errors > 5% / p95 > 2 s as broken |
+| `failover.js` | 20 users, 2 min; one instance stopped at ~0:30 and started at ~1:30 | Good vs bad balancer when an instance dies | errors < 1% |
+
+Every script counts responses per instance (`X-Served-By`) in the `served_by` metric; `instance:none` = error responses that never reached an instance.
+
+```bash
+loadtest/run.sh smoke                                    # local docker compose (gateway on :8080)
+loadtest/run.sh load
+loadtest/run.sh stress
+loadtest/failover-demo.sh good                           # local: stops/starts app2 automatically
+loadtest/failover-demo.sh bad                            # same with GATEWAY_PROFILE=bad-balancer
+BASE_URL=http://<elastic-ip>:8080 loadtest/run.sh load   # against the EC2 test server
+```
+
+**Results on a local machine** (Docker Desktop, limits from `docker-compose.yml`):
+
+| Test | Requests | Errors | p95 | Distribution app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 30 | 0% | 41 ms | 10 / 10 / 10 | pass |
+| load (30 users) | 3,509 (33/s) | 0% | 406 ms | 1,180 / 1,165 / 1,164 | pass |
+| stress (up to 600 users) | 13,668 (76/s) | 3.7% (504 timeouts) | **8.7 s** | 4,307 / 4,579 / 4,278 | **breaks**: p95 4× over the limit |
+| failover, good balancer | 6,838 (57/s) | **0.11%** (8) | — | 3,156 / 522 / 3,152 | pass: the dead instance is hidden |
+| failover, bad balancer | 3,242 (27/s) | **27.5%** (891) | — | 1,080 / 190 / 1,081 | **fails**: a third of the traffic goes to the dead instance |
+
+**How to read them:**
+- **Stress:** the first component to saturate is the **gateway** (at its 0.5 CPU limit while the instances were at 15-50%). It is the single entry point, so it is also the first bottleneck. Adding instances does not help past that point; the gateway would need more CPU or its own replicas.
+- **Failover:** with the good balancer, Retry sends the request to the next instance at once, and the health check removes the dead one within 5 s. With the bad balancer, round robin keeps sending one request in three to the dead instance. Those requests fail, and throughput halves because clients wait on failed connections.
+
+
+### AWS test server: EC2 t3.micro (1 GB)
+
+The AWS Academy student account only allows a **t3.micro (2 vCPU, 1 GB RAM)**, so `deploy/docker-compose.test.yml` keeps the same layout (gateway :8080, app1-app3 :8081-8083, PostgreSQL) with a small memory footprint:
+
+| Container | `mem_limit` | JVM / settings | Used at rest | Used under stress |
+|---|---|---|---|---|
+| gateway | 200 MB | `-Xmx80m`, metaspace 80 MB, direct memory 32 MB | 130 MB | 176 MB |
+| app1, app2, app3 (each) | 230 MB | `-Xmx112m`, metaspace 96 MB, Hikari pool 5, 40 Tomcat threads | ~150 MB | ~166 MB |
+| db (PostgreSQL) | 96 MB | `shared_buffers=16MB`, `max_connections=30` | 72 MB | 72 MB |
+
+All JVMs use Serial GC, the C1 compiler only and `-XX:+ExitOnOutOfMemoryError`, so Docker restarts a container instead of leaving it half alive. The server gets **2 GB of swap** for start-up peaks. The instances start one after another (about 100 s on the simulation, longer on the real server), and the deploy health check waits up to 15 minutes.
+
+**One-time server preparation** (SSH or EC2 Instance Connect). It installs Docker and the Compose plugin, adds the swap and creates `/opt/prograweb`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jeyby99/PrograWeb_JS_VANILLA/dev/deploy/server-setup.sh | sudo bash
+```
+
+**Results with the t3.micro limits** (local simulation with the same compose file and limits):
+
+| Test | Requests | Errors | p95 | app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 30 | 0% | 33 ms | 9 / 12 / 9 | pass |
+| load (30 users) | 4,801 | 0% | 30 ms | 1,598 / 1,599 / 1,604 | pass |
+| stress (up to 600 users) | 19,317 | **17.8%** | **4.9 s** | 5,074 / 5,414 / 5,383 | **breaks**, then recovers (API 200 right after, no container restarted) |
+| failover, good balancer | 7,471 | **0.06%** | — | 3,422 / 626 / 3,418 | pass |
+| failover, bad balancer | 4,399 | **23.7%** | — | 1,466 / 424 / 1,467 | **fails** |
+
 ## How to Run
 
 **Requirements:** JDK 17, Maven and PostgreSQL. Node.js 18+ only if you want to run the tests.
@@ -341,11 +424,11 @@ Tables are created automatically thanks to `spring.jpa.hibernate.ddl-auto=update
 **Requirements:** Docker Desktop (no JDK, Maven or PostgreSQL needed).
 
 ```bash
-docker compose up --build      # builds the images and starts gateway + app1 + app2 + PostgreSQL
+docker compose up --build      # builds the images and starts gateway + app1 + app2 + app3 + PostgreSQL
 docker compose down            # stops everything (add -v to also delete the data)
 ```
 
-- App (through the API Gateway): http://localhost:8080. The backend instances (app1, app2) are not published.
+- App (through the API Gateway): http://localhost:8080. Instances directly: http://localhost:8081, :8082, :8083. The first start takes a few minutes: instances start one after another.
 - Rick and Morty API through the gateway: http://localhost:8080/rickandmorty/character/?name=rick
 - Gateway health: http://localhost:8080/actuator/health
 - PostgreSQL (from the host): `localhost:5433`, database `PrograWeb`. Port 5433 avoids clashing with a local PostgreSQL.
@@ -358,11 +441,12 @@ docker pull ghcr.io/jeyby99/prograweb:latest
 docker pull ghcr.io/jeyby99/prograweb-gateway:latest
 ```
 
-**Without Docker:** run two backend instances on ports 8081 and 8082 and the gateway on 8080:
+**Without Docker:** run three backend instances on ports 8081-8083 and the gateway on 8080:
 
 ```bash
 mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8081 --INSTANCE_NAME=app1"
 mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8082 --INSTANCE_NAME=app2"
+mvn spring-boot:run -Dspring-boot.run.arguments="--server.port=8083 --INSTANCE_NAME=app3"
 mvn -f gateway/pom.xml spring-boot:run
 ```
 

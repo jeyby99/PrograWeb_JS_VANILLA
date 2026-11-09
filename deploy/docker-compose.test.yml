@@ -1,0 +1,125 @@
+# Test environment on the AWS EC2 server (epic SCRUM-14), same layout as the root
+# docker-compose.yml but with the images published by GitHub Actions to GHCR:
+#   gateway  :8080        ghcr.io/jeyby99/prograweb-gateway:${IMAGE_TAG}
+#   app1..3  :8081-8083   ghcr.io/jeyby99/prograweb:${IMAGE_TAG}
+#   db                    PostgreSQL, not published
+# The Security Group decides what is reachable from the internet (22 and 8080 by default).
+#
+# Sized for an EC2 t3.micro (2 vCPU, 1 GB RAM) + 2 GB of swap (deploy/server-setup.sh), SCRUM-29.
+# Memory budget (limits): db 96 MB + 3 x 230 MB + gateway 200 MB. Real use is lower;
+# the swap absorbs start-up peaks. Expect slower start-up and an earlier breaking point.
+#
+# Usage on the server (in /opt/prograweb, next to a .env file written by deploy.sh):
+#   docker compose -f docker-compose.test.yml pull
+#   docker compose -f docker-compose.test.yml up -d
+
+# Small-footprint JVMs (JAVA_TOOL_OPTIONS below): small heap/metaspace/code cache,
+# Serial GC (one GC thread), C1 compiler only, and exit on OutOfMemory so that
+# Docker restarts the container instead of leaving it half alive.
+
+x-backend: &backend
+  image: ghcr.io/jeyby99/prograweb:${IMAGE_TAG:-test}
+  # Comes back on its own when the Learner Lab starts the instance again
+  restart: unless-stopped
+  environment: &backend-env
+    SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/PrograWeb
+    SPRING_DATASOURCE_USERNAME: ${DB_USERNAME:-postgres}
+    SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    SPRING_JPA_SHOW_SQL: "false"
+    SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"   # 3 instances x 5 = 15 DB connections
+    SERVER_TOMCAT_THREADS_MAX: "40"                   # fewer threads = less stack memory
+    JAVA_TOOL_OPTIONS: "-Xmx112m -XX:MaxMetaspaceSize=96m -XX:MaxDirectMemorySize=16m -Xms48m -Xss256k -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:CICompilerCount=1 -XX:ReservedCodeCacheSize=24m -XX:+ExitOnOutOfMemoryError"
+  mem_limit: 230m
+  cpus: 0.5
+  healthcheck:
+    test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:$$SERVER_PORT/api/entidades || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 30
+    start_period: 120s   # a t3.micro starts a Spring Boot app much more slowly
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    # Small PostgreSQL: enough for 3 pools of 5 connections
+    command: >
+      postgres -c shared_buffers=16MB -c max_connections=30 -c work_mem=1MB
+               -c maintenance_work_mem=8MB -c effective_cache_size=64MB
+    environment:
+      POSTGRES_DB: PrograWeb
+      POSTGRES_USER: ${DB_USERNAME:-postgres}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
+    # No "ports": the database is only reachable from the instances
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 96m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USERNAME:-postgres} -d PrograWeb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app1:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8081
+      INSTANCE_NAME: app1
+    ports:
+      - "8081:8081"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Each instance waits for the previous one: only one creates the tables, and the
+  # start-up CPU/memory peaks do not overlap on the small server
+  app2:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8082
+      INSTANCE_NAME: app2
+    ports:
+      - "8082:8082"
+    depends_on:
+      app1:
+        condition: service_healthy
+
+  app3:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      SERVER_PORT: 8083
+      INSTANCE_NAME: app3
+    ports:
+      - "8083:8083"
+    depends_on:
+      app2:
+        condition: service_healthy
+
+  gateway:
+    image: ghcr.io/jeyby99/prograweb-gateway:${IMAGE_TAG:-test}
+    restart: unless-stopped
+    depends_on:
+      app1:
+        condition: service_healthy
+      app2:
+        condition: service_healthy
+      app3:
+        condition: service_healthy
+    environment:
+      BACKEND_1_URL: http://app1:8081
+      BACKEND_2_URL: http://app2:8082
+      BACKEND_3_URL: http://app3:8083
+      # default = good balancer; bad-balancer only for the demo (deploy.sh balancer bad)
+      SPRING_PROFILES_ACTIVE: ${GATEWAY_PROFILE:-default}
+      # Netty needs some direct memory for its buffers
+      JAVA_TOOL_OPTIONS: "-Xmx80m -XX:MaxMetaspaceSize=80m -XX:MaxDirectMemorySize=32m -Xms48m -Xss256k -XX:+UseSerialGC -XX:TieredStopAtLevel=1 -XX:CICompilerCount=1 -XX:ReservedCodeCacheSize=24m -XX:+ExitOnOutOfMemoryError"
+    mem_limit: 200m
+    cpus: 0.5
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
