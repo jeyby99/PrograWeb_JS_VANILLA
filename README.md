@@ -398,8 +398,12 @@ curl -fsSL https://raw.githubusercontent.com/jeyby99/PrograWeb_JS_VANILLA/dev/de
 | load (30 users) | 4,189 (40/s) | 0% | 111 ms | 1,398 / 1,395 / 1,396 | pass |
 | stress (up to 600 users) | 70,438 (391/s) | 0% | 1.51 s | 23,464 / 23,612 / 23,362 | **survives**, 14× slower |
 | breakpoint (up to 2,000 users) | 54,824 (365/s) | 0.64% timeouts (first run: thousands) | **6.88 s** | 17,677 / 19,074 / 17,722 | **breaks** between 1,000 and 2,000 users; recovers right after |
+| failover, good balancer (app2 stopped ~1 min) | 5,102 (42/s) | **0.05%** (3) | — | 2,241 / 612 / 2,246 | pass: the failure is hidden |
+| failover, bad balancer (app2 stopped ~1 min) | 3,698 (31/s) | **16.9%** (625) | — | 1,233 / 607 / 1,233 | **fails**: ~1 in 3 requests while app2 is down |
 
 On Linux the real server handles more than the Docker Desktop simulation, so `stress.js` only slows it down; `breakpoint.js` finds where it really fails. The throughput tops out at ~390 requests/s.
+
+How the failover runs were done on the server: `deploy.sh balancer good|bad` to choose the balancer (checked from outside with the `X-Balancer` header), then `docker compose -f docker-compose.test.yml stop app2` ~45 s into the 2-minute k6 run and `start app2` 60 s later.
 
 ## How to Run
 
