@@ -20,6 +20,8 @@ Full-stack web project with a **Java Spring Boot** backend and a **JavaScript (j
 11. [How to Run](#how-to-run)
 12. [Run with Docker](#run-with-docker)
 13. [CI/CD](#cicd)
+    - [Deployment to AWS (test)](#deployment-to-aws-test)
+    - [Learner Lab runbook](#learner-lab-runbook)
 14. [Development Workflow](#development-workflow)
 15. [Author](#author)
 
@@ -474,9 +476,74 @@ GitHub Actions workflows live in `.github/workflows/`:
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | Push or PR to `dev`, `test`, `main` | Maven build (Java 17), Playwright e2e tests (in the official Playwright container) and a Docker image build without pushing |
-| `docker-publish.yml` | Push to `main` (or manual run) | Builds and pushes `ghcr.io/jeyby99/prograweb` with tags `latest` and `sha-<commit>` |
+| `docker-publish.yml` | Push to `main` or `test` (or manual run) | Builds and pushes `ghcr.io/jeyby99/prograweb` and `ghcr.io/jeyby99/prograweb-gateway`. `main` → `latest` + `sha-<commit>`; `test` → `test` + `test-sha-<commit>`, then calls `deploy-test.yml` |
+| `deploy-test.yml` | Called after a `test` image is published, or manual run | Deploys that exact image to the AWS EC2 test server: health check, Playwright smoke tests against the server, automatic rollback |
 
 On CI, Playwright retries a failed test up to 2 times because some tests depend on timing (debounce and chained requests). Locally there are no retries.
+
+### Deployment to AWS (test)
+
+**Test server:** http://32.199.131.132:8080 (EC2 t3.micro in the AWS Academy Learner Lab, Elastic IP). It only answers while the lab is running.
+
+```
+PR to dev/test/main ──► ci.yml (build + e2e + Docker build) ──► merge into test
+        │
+        ▼
+docker-publish.yml ── pushes prograweb + prograweb-gateway :test-sha-<commit> to GHCR
+        │
+        ▼
+deploy-test.yml
+  deploy   : SSH to EC2 → copy compose + scripts → deploy.sh deploy <tag> → health-check.sh (≤ 15 min)
+             unhealthy → deploy.sh rollback, workflow fails
+  smoke    : Playwright suite against http://<EC2_HOST>:8080
+  rollback : only if the smoke tests fail → previous image back, workflow fails
+```
+
+- The workflow deploys the **exact tag** of the build (`test-sha-<commit>`), never "whatever `test` points to later".
+- It connects over **SSH** with a deploy key, not with AWS credentials (Learner Lab keys expire every ~4 hours). If port 22 does not answer, it fails at once with *"Start the AWS Academy Learner Lab"*.
+- Configuration lives in the GitHub environment **`test`**: variables `EC2_HOST`, `EC2_USER` (and optional `DB_USERNAME`, `EC2_HOST_KEY`), secrets `EC2_SSH_KEY`, `DB_PASSWORD`. Nothing secret is in the repository; the DB credentials reach the server on stdin and are stored in `/opt/prograweb/.env` (mode 600).
+- The job summary shows the deployed tag and the server URL. When the smoke tests fail, the Playwright report is uploaded as an artifact (kept 7 days).
+- Only one deployment runs at a time.
+
+**Manual redeploy** (for example after the lab was off during a merge): GitHub → **Actions** → **Deploy to test (AWS EC2)** → **Run workflow** → branch `test`, image tag `test` (latest test build) or a specific `test-sha-<commit>`. With the GitHub CLI:
+
+```bash
+gh workflow run deploy-test.yml --ref test -f image-tag=test
+```
+
+Re-running a failed run ("Re-run failed jobs") does the same for that run's tag.
+
+**On the server** (`ssh ec2-user@32.199.131.132`, then `cd /opt/prograweb`):
+
+| Command | What it does |
+|---|---|
+| `bash deploy.sh status` | Running tag, previous tag, gateway profile and container states |
+| `bash deploy.sh rollback` | Goes back to the configuration that ran before the last deploy |
+| `bash deploy.sh balancer good` / `bad` | Switches the gateway between the good and the bad balancer (restarts only the gateway) |
+| `docker compose -f docker-compose.test.yml logs --tail 100 app1` | Logs of one container (`app1`, `app2`, `app3`, `gateway`, `db`) |
+| `free -h` | RAM and swap use |
+
+### Learner Lab runbook
+
+1. **Start the lab** in AWS Academy (Start Lab) and wait until the dot next to "AWS" turns **green** (a few minutes).
+2. **Check the instance** in the EC2 console: state *Running*, Elastic IP `32.199.131.132` (it keeps the same address after every restart). The lab starts the instance again by itself; the containers come back on their own (`restart: unless-stopped`) a few minutes later.
+3. **Check the app:** http://32.199.131.132:8080 (the instances start one after another; allow ~5 minutes after the instance starts).
+4. **If a deployment failed because the lab was off**, run the manual redeploy above (or re-run the failed run).
+5. **End Lab when finished.** Sessions last 4 hours at most; when one ends, AWS stops the instance (data in the database volume is kept).
+
+**Cost notes:** while the lab runs, the t3.micro, the public IPv4 address of the Elastic IP and the 20 GB EBS volume each cost cents per day; outside lab sessions only the EBS volume and the address keep a small cost. That stays well under the USD 50 Learner Lab budget as long as the lab is not left running for days. Check the remaining budget on the Learner Lab page.
+
+**Troubleshooting**
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| Deploy fails at *"Set up SSH"* (port 22 not reachable) / SSH timeout | Lab off, or the Security Group lost the port 22 rule | Start the lab; check the inbound rule for 22 |
+| `curl` to :8080 times out from your PC (exit 28) while SSH works | Security Group has no rule for 8080 | Add an inbound rule TCP 8080 |
+| Connection refused on :8080 (exit 7) | Gateway not started yet, or stopped | `bash deploy.sh status`; wait for the instances or check `logs gateway` |
+| Image pull *denied* / *unauthorized* | A GHCR package was made private | Make `prograweb` and `prograweb-gateway` public again, or `docker login ghcr.io` on the server with a `read:packages` token |
+| Health check times out | Instances start slowly or keep restarting (out of memory) | `bash deploy.sh status`, `logs app1`, `free -h` (swap must show 2 GB); the deploy has already rolled back |
+| Smoke tests fail, previous version back | A real bug in that build | Open the Playwright report artifact of the run, fix, merge again |
+| `X-Balancer: bad` after the demo | The bad balancer was left on | `bash deploy.sh balancer good` |
 
 ## Development Workflow
 
@@ -490,13 +557,13 @@ Jira ticket (SCRUM-X) ──► feature/SCRUM-X-short-name ──PR──► dev
 2. **Branch.** Create `feature/SCRUM-X-short-name` from `dev`.
 3. **Commits.** Every commit message starts with the ticket key, for example `SCRUM-8: Add docker-compose with PostgreSQL`.
 4. **Pull requests.** Open a PR to `dev` with the Jira link, what changed, why, and how it was tested. CI must pass, and the PR gets a review comment before it is merged.
-5. **Promotion.** `dev` → `test` (testing) → `main` (release) through PRs. Merging into `main` publishes the Docker image.
+5. **Promotion.** `dev` → `test` (testing) → `main` (release) through PRs. Merging into `test` publishes the `test` images and deploys them to the AWS test server; merging into `main` publishes the release images.
 6. **Language.** All documentation, code comments, commits, PRs and Jira tickets are written in English.
 
 | Branch | Purpose |
 |---|---|
 | `main` | Stable version; every update publishes the Docker image |
-| `test` | Integration and testing before release |
+| `test` | Integration and testing before release; every update is deployed to the AWS test server |
 | `dev` | Development; feature branches are merged here |
 | `feature/SCRUM-X-*` | One branch per Jira ticket |
 
