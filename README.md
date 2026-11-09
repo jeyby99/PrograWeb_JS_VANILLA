@@ -332,6 +332,7 @@ The load balancer is tested with [k6](https://k6.io) (`loadtest/`). k6 runs in D
 | `smoke.js` | 1 user, 30 s | Everything answers before heavier tests | 0 errors, p95 < 1 s |
 | `load.js` | ramp to 30 users, hold 1 min | Normal expected load | errors < 1%, p95 < 800 ms |
 | `stress.js` | 50 → 100 → 200 → 400 → 600 users, no pauses | **Breaking point**: where latency explodes and requests fail. Expected to fail | marks errors > 5% / p95 > 2 s as broken |
+| `breakpoint.js` | 600 → 1,000 → 1,500 → 2,000 users, no pauses | Breaking point of the real EC2 t3.micro, which survives `stress.js`. Expected to fail | same as stress |
 | `failover.js` | 20 users, 2 min; one instance stopped at ~0:30 and started at ~1:30 | Good vs bad balancer when an instance dies | errors < 1% |
 
 Every script counts responses per instance (`X-Served-By`) in the `served_by` metric; `instance:none` = error responses that never reached an instance.
@@ -340,6 +341,7 @@ Every script counts responses per instance (`X-Served-By`) in the `served_by` me
 loadtest/run.sh smoke                                    # local docker compose (gateway on :8080)
 loadtest/run.sh load
 loadtest/run.sh stress
+loadtest/run.sh breakpoint                               # heavier: for the EC2 server
 loadtest/failover-demo.sh good                           # local: stops/starts app2 automatically
 loadtest/failover-demo.sh bad                            # same with GATEWAY_PROFILE=bad-balancer
 BASE_URL=http://<elastic-ip>:8080 loadtest/run.sh load   # against the EC2 test server
@@ -387,6 +389,17 @@ curl -fsSL https://raw.githubusercontent.com/jeyby99/PrograWeb_JS_VANILLA/dev/de
 | stress (up to 600 users) | 19,317 | **17.8%** | **4.9 s** | 5,074 / 5,414 / 5,383 | **breaks**, then recovers (API 200 right after, no container restarted) |
 | failover, good balancer | 7,471 | **0.06%** | — | 3,422 / 626 / 3,418 | pass |
 | failover, bad balancer | 4,399 | **23.7%** | — | 1,466 / 424 / 1,467 | **fails** |
+
+**Results on the real EC2 t3.micro** (32.199.131.132, k6 from a home PC, ~85 ms network latency included):
+
+| Test | Requests | Errors | p95 | app1 / app2 / app3 | Result |
+|---|---|---|---|---|---|
+| smoke | 28 | 0% | 95 ms | 11 / 8 / 9 | pass |
+| load (30 users) | 4,189 (40/s) | 0% | 111 ms | 1,398 / 1,395 / 1,396 | pass |
+| stress (up to 600 users) | 70,438 (391/s) | 0% | 1.51 s | 23,464 / 23,612 / 23,362 | **survives**, 14× slower |
+| breakpoint (up to 2,000 users) | 54,824 (365/s) | 0.64% timeouts (first run: thousands) | **6.88 s** | 17,677 / 19,074 / 17,722 | **breaks** between 1,000 and 2,000 users; recovers right after |
+
+On Linux the real server handles more than the Docker Desktop simulation, so `stress.js` only slows it down; `breakpoint.js` finds where it really fails. The throughput tops out at ~390 requests/s.
 
 ## How to Run
 
